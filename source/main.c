@@ -39,6 +39,7 @@
 #define READER_PINCH_DEADZONE 0.12f
 #define READER_OVERLAY_MS 2200
 #define NEXT_CHAPTER_MS 5000
+#define AREA_COUNT 2
 
 #define JOY_A      0
 #define JOY_B      1
@@ -64,7 +65,7 @@ static int g_portrait = 1;
 static char *g_token = NULL;
 static char g_server[256] = {0};
 static char g_username[96] = {0};
-static const char *AREAS[3] = { "manga", "comics", "books" };
+static const char *AREAS[AREA_COUNT] = { "manga", "comics" };
 static int areaIdx = 0;
 static char g_search[96] = {0};
 static int catViewMode = 0; // 0 = capas, 1 = lista compacta
@@ -145,6 +146,7 @@ static float readerPinchBaseDist = 0.0f;
 static float readerPinchBaseZoom = 1.0f;
 
 static void enter_reader(int idx);
+static void load_catalog(void);
 static void reader_reset_view(void);
 static void reader_start_next_prompt(void);
 static void reader_clamp_pan(void);
@@ -257,6 +259,7 @@ static Btn btn_exit(void)   { Btn b = { 6, 8, 110, TB - 14, "Sair" };     return
 static Btn btn_rotate(void) { Btn b = { LW() - 130, 8, 124, TB - 14, "Girar" }; return b; }
 static Btn btn_continue(void) { Btn b = { 124, 8, 150, TB - 14, "Continuar" }; return b; }
 static Btn btn_favorites(void) { Btn b = { 282, 8, 140, TB - 14, "Favoritos" }; return b; }
+static Btn btn_catalog_home(void) { Btn b = { 282, 8, 140, TB - 14, "Biblioteca" }; return b; }
 static Btn btn_settings(void) { Btn b = { 430, 8, 120, TB - 14, "Conta" }; return b; }
 static Btn btn_library(void)  { Btn b = { 6, 8, 160, TB - 14, "Biblioteca" }; return b; }
 static Btn btn_area(void)   { Btn b = { LW()/2 - 170, LH() - 50, 110, 40, "Area" };  return b; }
@@ -272,6 +275,15 @@ static Btn btn_switch_account(void) { Btn b = { 30, LH() - FOOTER_H - 72, 230, 5
 
 static int is_catalog_screen(void) {
     return screen == SC_SERIES || screen == SC_FAVORITES;
+}
+
+static void return_to_library(void) {
+    catalogFavorites = 0;
+    catPage = 0;
+    catSel = 0;
+    catScroll = 0;
+    load_catalog();
+    screen = SC_SERIES;
 }
 
 static void draw_background(void) {
@@ -960,7 +972,6 @@ static void load_profile(void) {
     cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
     cJSON *limits = cJSON_GetObjectItemCaseSensitive(root, "limits");
     cJSON *chapters = cJSON_GetObjectItemCaseSensitive(limits, "chapters");
-    cJSON *books = cJSON_GetObjectItemCaseSensitive(limits, "books");
     cJSON *counts = cJSON_GetObjectItemCaseSensitive(root, "counts");
     const char *tier = json_str(user, "tier", "free");
     snprintf(profileTier, sizeof(profileTier), "%s", tier);
@@ -971,15 +982,13 @@ static void load_profile(void) {
 
     if (hasFullAccess) {
         snprintf(profileChapters, sizeof(profileChapters), "Capitulos: ilimitado");
-        snprintf(profileBooks, sizeof(profileBooks), "Livros: tempo ilimitado");
+        snprintf(profileBooks, sizeof(profileBooks), "Livros: ocultos nesta versao do Switch.");
     } else {
         int used = json_int(chapters, "usedToday", 0);
         int remaining = json_int(chapters, "remainingToday", 0);
         int limit = json_int(chapters, "limit", 3);
-        int bookRemainingMs = json_int(books, "remainingTodayMs", 0);
-        int bookLimitMs = json_int(books, "limitMs", 15 * 60 * 1000);
         snprintf(profileChapters, sizeof(profileChapters), "Capitulos hoje: %d/%d usados, %d restantes", used, limit, remaining);
-        snprintf(profileBooks, sizeof(profileBooks), "Livros hoje: %d min restantes de %d min", bookRemainingMs / 60000, bookLimitMs / 60000);
+        snprintf(profileBooks, sizeof(profileBooks), "Livros: ocultos nesta versao do Switch.");
     }
 
     snprintf(profileCounts, sizeof(profileCounts), "Favoritos %d  Prateleira %d  Continuar %d",
@@ -1224,25 +1233,6 @@ static void reader_tick(void) {
 }
 
 // ---------------- render ----------------
-static void draw_version_badge(void) {
-    char label[32];
-    int tw = 0, th = 0;
-    Btn rot = btn_rotate();
-    snprintf(label, sizeof(label), "v%s", APP_VERSION_STR);
-    SDL_Texture *t = text_make(gRen, label, COL_DIM, 0, &tw, &th);
-    if (!t) return;
-    int x = rot.x - tw - 14;
-    if (x < 8) x = 8;
-    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 180);
-    SDL_Rect bg = { x - 8, 11, tw + 16, 34 };
-    SDL_RenderFillRect(gRen, &bg);
-    SDL_SetRenderDrawColor(gRen, 54, 70, 96, 220);
-    SDL_RenderDrawRect(gRen, &bg);
-    SDL_Rect d = { x, 11 + (34 - th) / 2, tw, th };
-    SDL_RenderCopy(gRen, t, NULL, &d);
-    SDL_DestroyTexture(t);
-}
-
 static void draw_topbar(const char *title, Btn left) {
     SDL_SetRenderDrawColor(gRen, 16, 20, 31, 245);
     SDL_Rect bar = { 0, 0, LW(), TB };
@@ -1251,7 +1241,6 @@ static void draw_topbar(const char *title, Btn left) {
     SDL_RenderDrawLine(gRen, 0, TB - 1, LW(), TB - 1);
     btn_draw(left);
     btn_draw(btn_rotate());
-    draw_version_badge();
     if (title) text_draw(gRen, title, left.x + left.w + 16, 12, COL_HEAD, 0);
 }
 
@@ -1271,14 +1260,14 @@ static void render_series(void) {
     SDL_RenderDrawLine(gRen, 0, TB - 1, LW(), TB - 1);
     btn_draw(btn_exit());
     btn_draw(btn_continue());
-    btn_draw(btn_favorites());
+    btn_draw(catalogFavorites ? btn_catalog_home() : btn_favorites());
     btn_draw(btn_settings());
     btn_draw(btn_rotate());
-    draw_version_badge();
 
     if (catCount == 0) {
-        if (catalogLoadFailed) draw_empty_state("Favoritos ainda nao conectados", "Precisa da rota /switch/favorites no Meruem web.");
-        else draw_empty_state(catalogFavorites ? "Nenhum favorito" : "Nada encontrado", "Tente outra busca ou troque a area.");
+        if (catalogLoadFailed) draw_empty_state("Favoritos ainda nao conectados", "Atualize o Meruem web para liberar /switch/favorites.");
+        else if (catalogFavorites) draw_empty_state("Nenhum favorito ainda", "Favorite obras no site Meruem. Depois elas aparecem aqui no Switch.");
+        else draw_empty_state("Nada encontrado", "Tente outra busca ou troque a area.");
     } else if (catViewMode == 0) {
         int cols = grid_cols(), gap = grid_gap();
         int cardW = grid_card_w(), coverH = grid_cover_h(), cellH = grid_cell_h();
@@ -1317,7 +1306,7 @@ static void render_series(void) {
             draw_row_shell(y, idx == catSel);
             char row[320], meta[160];
             snprintf(row, sizeof(row), "%.46s", title);
-            snprintf(meta, sizeof(meta), "%s  item %d de %d  .  A abre capitulos", AREAS[areaIdx], idx + 1, catCount);
+            snprintf(meta, sizeof(meta), "%s  item %d de %d  .  A abre capitulos", catTitle, idx + 1, catCount);
             text_draw(gRen, row, 24, y + 8, idx == catSel ? COL_SEL : COL_TEXT, 0);
             text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
         }
@@ -1327,7 +1316,7 @@ static void render_series(void) {
         draw_scrollbar(catScroll, catCount, vis);
         draw_more_hint(catScroll, catCount, vis);
     }
-    draw_footer(NULL);
+    draw_footer(catalogFavorites ? "B/Biblioteca: voltar    Favoritos vem do site Meruem    X: alternar visual" : NULL);
     draw_catalog_status_chip(hd, catPage + 1, catTotal, shownStart, catCount);
     if (catCount > 0) draw_series_help(shownStart, shownEnd, catCount);
     btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search()); btn_draw(btn_view_mode()); btn_draw(btn_next());
@@ -1337,7 +1326,7 @@ static void render_settings(void) {
     draw_background();
     draw_topbar("Conta e ajustes", btn_library());
     SDL_SetRenderDrawColor(gRen, 22, 30, 46, 232);
-    SDL_Rect box = { 28, LIST_Y + 12, LW() - 56, 390 };
+    SDL_Rect box = { 28, LIST_Y + 12, LW() - 56, 430 };
     SDL_RenderFillRect(gRen, &box);
     SDL_SetRenderDrawColor(gRen, 92, 152, 76, 180);
     SDL_RenderDrawRect(gRen, &box);
@@ -1348,19 +1337,21 @@ static void render_settings(void) {
     text_draw(gRen, line, box.x + 24, box.y + 78, COL_SEL, 0);
     snprintf(line, sizeof(line), "Servidor: %.52s", g_server[0] ? g_server : DEFAULT_SERVER);
     text_draw(gRen, line, box.x + 24, box.y + 118, COL_SOFT, 0);
-    text_draw(gRen, "Assinatura e limite diario:", box.x + 24, box.y + 170, COL_HEAD, 0);
+    snprintf(line, sizeof(line), "Versao do app: %s", APP_VERSION_STR);
+    text_draw(gRen, line, box.x + 24, box.y + 154, COL_DIM, 0);
+    text_draw(gRen, "Assinatura e limite diario:", box.x + 24, box.y + 196, COL_HEAD, 0);
     if (profileLoaded) {
         snprintf(line, sizeof(line), "Plano: %s", profileTier[0] ? profileTier : "free");
-        text_draw(gRen, line, box.x + 24, box.y + 210, COL_SEL, 0);
-        text_draw(gRen, profileAccess, box.x + 24, box.y + 246, COL_SOFT, 0);
-        text_draw(gRen, profileChapters, box.x + 24, box.y + 282, COL_DIM, 0);
-        text_draw(gRen, profileBooks, box.x + 24, box.y + 318, COL_DIM, 0);
-        text_draw(gRen, profileCounts, box.x + 24, box.y + 354, COL_DIM, 0);
+        text_draw(gRen, line, box.x + 24, box.y + 236, COL_SEL, 0);
+        text_draw(gRen, profileAccess, box.x + 24, box.y + 272, COL_SOFT, 0);
+        text_draw(gRen, profileChapters, box.x + 24, box.y + 308, COL_DIM, 0);
+        text_draw(gRen, profileBooks, box.x + 24, box.y + 344, COL_DIM, 0);
+        text_draw(gRen, profileCounts, box.x + 24, box.y + 380, COL_DIM, 0);
     } else if (profileFailed) {
-        text_draw(gRen, "Nao foi possivel sincronizar /switch/me agora.", box.x + 24, box.y + 210, COL_DIM, 0);
-        text_draw(gRen, "Atualize o Meruem web no servidor e tente abrir esta tela novamente.", box.x + 24, box.y + 250, COL_DIM, 0);
+        text_draw(gRen, "Nao foi possivel sincronizar /switch/me agora.", box.x + 24, box.y + 236, COL_DIM, 0);
+        text_draw(gRen, "Atualize o Meruem web no servidor e tente abrir esta tela novamente.", box.x + 24, box.y + 276, COL_DIM, 0);
     } else {
-        text_draw(gRen, "Sincronizando conta com o Meruem web...", box.x + 24, box.y + 210, COL_DIM, 0);
+        text_draw(gRen, "Sincronizando conta com o Meruem web...", box.x + 24, box.y + 236, COL_DIM, 0);
     }
     btn_draw(btn_switch_account());
     draw_footer("A/toque: acao    B/Biblioteca: voltar    ZL/ZR: girar");
@@ -1492,11 +1483,12 @@ static void handle_tap(int lx, int ly) {
     if (is_catalog_screen()) {
         if (btn_hit(btn_exit(), lx, ly)) { if (running_ptr) *running_ptr = 0; return; }
         if (btn_hit(btn_continue(), lx, ly)) { load_continue(); screen = SC_CONTINUE; return; }
-        if (btn_hit(btn_favorites(), lx, ly)) { catPage = 0; catSel = 0; load_favorites(); screen = SC_FAVORITES; return; }
+        if (catalogFavorites && btn_hit(btn_catalog_home(), lx, ly)) { return_to_library(); return; }
+        if (!catalogFavorites && btn_hit(btn_favorites(), lx, ly)) { catPage = 0; catSel = 0; load_favorites(); screen = SC_FAVORITES; return; }
         if (btn_hit(btn_settings(), lx, ly)) { load_profile(); screen = SC_SETTINGS; return; }
         if (btn_hit(btn_prev(), lx, ly)) { if (catPage > 0) { catPage--; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } return; }
         if (btn_hit(btn_next(), lx, ly)) { if (catPage < catTotal - 1) { catPage++; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } return; }
-        if (btn_hit(btn_area(), lx, ly)) { areaIdx = (areaIdx + 1) % 3; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); screen = SC_SERIES; return; }
+        if (btn_hit(btn_area(), lx, ly)) { areaIdx = (areaIdx + 1) % AREA_COUNT; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); screen = SC_SERIES; return; }
         if (btn_hit(btn_view_mode(), lx, ly)) { toggle_catalog_view(); return; }
         if (btn_hit(btn_search(), lx, ly)) {
             char term[96] = {0};
@@ -1821,10 +1813,10 @@ int main(int argc, char **argv) {
                             else if (catViewMode == 1 && b == JOY_DRIGHT) { catSel += visible_rows(); if (catSel > catCount - 1) catSel = catCount - 1; }
                             else if (b == JOY_L) { if (catPage > 0) { catPage--; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } }
                             else if (b == JOY_R) { if (catPage < catTotal - 1) { catPage++; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } }
-                            else if (b == JOY_Y) { areaIdx = (areaIdx + 1) % 3; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); }
+                            else if (b == JOY_Y) { areaIdx = (areaIdx + 1) % AREA_COUNT; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); }
                             else if (b == JOY_X) { toggle_catalog_view(); }
                             else if (b == JOY_MINUS) { store_clear_token(); if (g_token) { free(g_token); g_token = NULL; } if (!authenticate()) { running = 0; break; } catPage = 0; catSel = 0; load_catalog(); }
-                            else if (b == JOY_B) { load_continue(); screen = SC_CONTINUE; }
+                            else if (b == JOY_B) { if (catalogFavorites) return_to_library(); else { load_continue(); screen = SC_CONTINUE; } }
                             else if (b == JOY_A && catCount > 0) enter_series(catSel);
                             clamp_catalog_scroll_to_selection();
                         } else if (screen == SC_CHAPTERS) {
