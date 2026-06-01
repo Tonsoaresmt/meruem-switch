@@ -467,6 +467,40 @@ static int confirm_screen(const char *l1, const char *l2, const char *l3) {
     }
     return 0;
 }
+
+static int login_intro_screen(void) {
+    SDL_Event e;
+    while (appletMainLoop()) {
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) return 0;
+            if (e.type == SDL_FINGERUP) return 1;
+            if (e.type == SDL_JOYBUTTONDOWN) {
+                if (e.jbutton.button == JOY_PLUS || e.jbutton.button == JOY_B) return 0;
+                if (e.jbutton.button == JOY_A) return 1;
+            }
+        }
+        begin_frame();
+        draw_background();
+        SDL_SetRenderDrawColor(gRen, 22, 30, 46, 235);
+        SDL_Rect box = { 28, 150, LW() - 56, 420 };
+        SDL_RenderFillRect(gRen, &box);
+        SDL_SetRenderDrawColor(gRen, 76, 96, 130, 255);
+        SDL_RenderDrawRect(gRen, &box);
+        text_draw(gRen, "Entrar no Meruem", box.x + 28, box.y + 28, COL_HEAD, 1);
+        text_draw(gRen, "Antes de usar no Switch,", box.x + 28, box.y + 96, COL_TEXT, 0);
+        text_draw(gRen, "crie sua conta no site.", box.x + 28, box.y + 128, COL_TEXT, 0);
+        text_draw(gRen, "1. No celular ou PC, abra:", box.x + 28, box.y + 172, COL_SOFT, 0);
+        text_draw(gRen, DEFAULT_SERVER, box.x + 28, box.y + 210, COL_SEL, 0);
+        text_draw(gRen, "2. Crie sua conta ou confirme seu login.", box.x + 28, box.y + 264, COL_SOFT, 0);
+        text_draw(gRen, "3. Volte aqui e use o mesmo usuario.", box.x + 28, box.y + 318, COL_SOFT, 0);
+        text_draw(gRen, "A senha sera pedida na proxima tela.", box.x + 28, box.y + 350, COL_SOFT, 0);
+        text_draw(gRen, "A ou toque: ja tenho conta    B/+: sair", box.x + 28, box.y + 390, COL_DIM, 0);
+        end_frame();
+        SDL_Delay(16);
+    }
+    return 0;
+}
+
 static int authenticate(void) {
     char tok[160];
     if (store_load_token(tok, sizeof(tok))) {
@@ -474,18 +508,19 @@ static int authenticate(void) {
         if (token_is_valid(tok)) { g_token = strdup(tok); return 1; }
         store_clear_token();
     }
+    if (!login_intro_screen()) return 0;
     while (appletMainLoop()) {
         char user[96] = {0}, pass[96] = {0};
-        int ru = prompt_text("Usuario ou e-mail do Meruem", user, sizeof(user), 0);
+        int ru = prompt_text("Usuario ou e-mail da conta Meruem", user, sizeof(user), 0);
         if (ru == -1) return 0;
         if (ru == -2) continue;
-        int rp = prompt_text("Senha", pass, sizeof(pass), 1);
+        int rp = prompt_text("Senha da conta Meruem", pass, sizeof(pass), 1);
         if (rp == -1) return 0;
         if (rp == -2) continue;
         present_color(20, 20, 40);
         g_token = login_request(user, pass);
         if (g_token) { store_save_token(g_token); return 1; }
-        if (!message_screen("Login falhou. Verifique usuario/senha.", NULL)) return 0;
+        if (!message_screen("Login falhou. Verifique usuario/senha.", "Se ainda nao tem conta, crie no site primeiro.")) return 0;
     }
     return 0;
 }
