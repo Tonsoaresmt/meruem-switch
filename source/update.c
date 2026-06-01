@@ -71,6 +71,8 @@ void update_resolve_target_path(const char *argv0, char *out, size_t cap) {
 int update_check(struct update_info *info) {
     struct membuf resp = {0};
     char url[256];
+    const char *net_err = NULL;
+    long http_code = 0;
     cJSON *root = NULL;
     cJSON *assets = NULL;
     cJSON *asset = NULL;
@@ -84,8 +86,16 @@ int update_check(struct update_info *info) {
 
     snprintf(url, sizeof(url), "https://api.github.com/repos/%s/%s/releases/latest",
              UPDATE_REPO_OWNER, UPDATE_REPO_NAME);
-    if (net_request(url, "GET", NULL, NULL, &resp, NULL) != 200 || !resp.data) {
-        if (info) copy_text(info->message, sizeof(info->message), "Nao foi possivel consultar o GitHub Releases.");
+    http_code = net_request(url, "GET", NULL, NULL, &resp, &net_err);
+    if (info) info->http_code = http_code;
+    if (http_code != 200 || !resp.data) {
+        if (info) {
+            if (net_err && net_err[0]) {
+                snprintf(info->message, sizeof(info->message), "GitHub falhou: %s (%ld).", net_err, http_code);
+            } else {
+                snprintf(info->message, sizeof(info->message), "GitHub respondeu HTTP %ld.", http_code);
+            }
+        }
         result = UPDATE_CHECK_ERROR;
         goto done;
     }
@@ -106,6 +116,7 @@ int update_check(struct update_info *info) {
         }
         if (info) copy_text(info->latest_version, sizeof(info->latest_version), tag->valuestring);
         if (version_cmp(tag->valuestring, APP_VERSION_STR) <= 0) {
+            if (info) snprintf(info->message, sizeof(info->message), "GitHub latest: %s.", tag->valuestring);
             result = UPDATE_CHECK_UP_TO_DATE;
             goto done;
         }

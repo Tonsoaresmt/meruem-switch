@@ -469,9 +469,12 @@ static int prompt_text(const char *guide, char *out, size_t cap, int password) {
 // mensagem; A ou toque = continuar(1), + = sair(0)
 static int message_screen(const char *l1, const char *l2) {
     SDL_Event e;
+    Uint32 shown_at = SDL_GetTicks();
     while (appletMainLoop()) {
         while (SDL_PollEvent(&e)) {
+            int input_ready = (SDL_GetTicks() - shown_at) > 650;
             if (e.type == SDL_QUIT) return 0;
+            if (!input_ready) continue;
             if (e.type == SDL_FINGERUP) return 1;
             if (e.type == SDL_JOYBUTTONDOWN) {
                 if (e.jbutton.button == JOY_PLUS) return 0;
@@ -493,9 +496,12 @@ static int message_screen(const char *l1, const char *l2) {
 // A/toque = sim; B/+ = nao
 static int confirm_screen(const char *l1, const char *l2, const char *l3) {
     SDL_Event e;
+    Uint32 shown_at = SDL_GetTicks();
     while (appletMainLoop()) {
         while (SDL_PollEvent(&e)) {
+            int input_ready = (SDL_GetTicks() - shown_at) > 650;
             if (e.type == SDL_QUIT) return 0;
+            if (!input_ready) continue;
             if (e.type == SDL_FINGERUP) return 1;
             if (e.type == SDL_JOYBUTTONDOWN) {
                 if (e.jbutton.button == JOY_PLUS || e.jbutton.button == JOY_B) return 0;
@@ -573,6 +579,20 @@ static int authenticate(void) {
     return 0;
 }
 
+static void write_update_log(int rc, const struct update_info *info) {
+    FILE *f = fopen("sdmc:/switch/Meruem/update.log", "wb");
+    if (!f) return;
+    fprintf(f, "current=%s\n", APP_VERSION_STR);
+    fprintf(f, "result=%d\n", rc);
+    if (info) {
+        fprintf(f, "http=%ld\n", info->http_code);
+        fprintf(f, "latest=%s\n", info->latest_version);
+        fprintf(f, "asset=%s\n", info->asset_name);
+        fprintf(f, "message=%s\n", info->message);
+    }
+    fclose(f);
+}
+
 static int maybe_install_update(void) {
     struct update_info info;
     char line1[160];
@@ -589,6 +609,7 @@ static int maybe_install_update(void) {
     end_frame();
     SDL_Delay(700);
     rc = update_check(&info);
+    write_update_log(rc, &info);
     if (rc == UPDATE_CHECK_DISABLED || rc == UPDATE_CHECK_UP_TO_DATE) return 0;
     if (rc == UPDATE_CHECK_ERROR) {
         message_screen("Nao consegui consultar atualizacoes.", info.message[0] ? info.message : "O app vai continuar normalmente.");

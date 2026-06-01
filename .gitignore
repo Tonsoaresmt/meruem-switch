@@ -4,6 +4,7 @@
 *.nacp
 *.map
 Meruem.nro
+/release-builds/
 
 # Chaves do console — NUNCA versionar
 *.keys

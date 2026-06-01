@@ -26,6 +26,7 @@ struct update_info {
     char asset_name[128];
     char download_url[512];
     char message[256];
+    long http_code;
 };
 
 int update_check(struct update_info *info);
