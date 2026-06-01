@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/stat.h>
 #include <SDL.h>
 #include <SDL_image.h>
 #include <switch.h>
@@ -40,6 +41,7 @@
 #define READER_OVERLAY_MS 2200
 #define NEXT_CHAPTER_MS 5000
 #define AREA_COUNT 2
+#define OFFLINE_DIR "sdmc:/switch/Meruem/offline"
 
 #define JOY_A      0
 #define JOY_B      1
@@ -65,6 +67,7 @@ static int g_portrait = 1;
 static char *g_token = NULL;
 static char g_server[256] = {0};
 static char g_username[96] = {0};
+static int g_offline_mode = 0;
 static const char *AREAS[AREA_COUNT] = { "manga", "comics" };
 static int areaIdx = 0;
 static char g_search[96] = {0};
@@ -150,9 +153,11 @@ static void enter_reader(int idx);
 static void load_catalog(void);
 static void reader_reset_view(void);
 static void reader_start_next_prompt(void);
+static void reader_show_overlay(void);
 static void reader_clamp_pan(void);
 static void reader_open_next_chapter_now(void);
 static int reader_has_next_chapter(void);
+static void offline_download_current_chapter(void);
 
 static const SDL_Color COL_TEXT = { 220, 220, 228, 255 };
 static const SDL_Color COL_SEL  = { 255, 255, 255, 255 };
@@ -278,6 +283,7 @@ static Btn btn_chap_order(void) { Btn b = { LW() - 312, 8, 170, TB - 14, chapRev
 static Btn btn_next_open(void) { Btn b = { LW()/2 - 210, LH()/2 + 44, 190, 46, "Abrir agora" }; return b; }
 static Btn btn_next_cancel(void) { Btn b = { LW()/2 + 20, LH()/2 + 44, 170, 46, "Cancelar" }; return b; }
 static Btn btn_switch_account(void) { Btn b = { 30, LH() - FOOTER_H - 72, 230, 50, "Trocar conta" }; return b; }
+static Btn btn_offline(void) { Btn b = { LW() - 286, 8, 146, TB - 14, "Offline" }; return b; }
 
 static int is_catalog_screen(void) {
     return screen == SC_SERIES || screen == SC_FAVORITES;
@@ -464,20 +470,89 @@ static int token_is_valid(const char *token) {
     membuf_free(&r);
     return c == 200;
 }
+
+static int file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static void offline_safe_id(const char *id, char *out, size_t cap) {
+    size_t j = 0;
+    if (!out || cap == 0) return;
+    if (!id) id = "";
+    for (size_t i = 0; id[i] && j + 1 < cap; i++) {
+        char c = id[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '-' || c == '_';
+        out[j++] = ok ? c : '_';
+    }
+    out[j] = '\0';
+}
+
+static void offline_chapter_dir(const char *bookId, char *out, size_t cap) {
+    char safe[128];
+    offline_safe_id(bookId, safe, sizeof(safe));
+    snprintf(out, cap, "%s/%s", OFFLINE_DIR, safe[0] ? safe : "unknown");
+}
+
+static void offline_page_path(const char *bookId, int page, char *out, size_t cap) {
+    char dir[256];
+    offline_chapter_dir(bookId, dir, sizeof(dir));
+    snprintf(out, cap, "%s/%04d.img", dir, page);
+}
+
+static int offline_ensure_dirs(const char *bookId) {
+    char dir[256];
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/Meruem", 0777);
+    mkdir(OFFLINE_DIR, 0777);
+    offline_chapter_dir(bookId, dir, sizeof(dir));
+    mkdir(dir, 0777);
+    return 1;
+}
+
+static int offline_count_pages(const char *bookId, int pages) {
+    int n = 0;
+    char path[320];
+    if (!bookId || !bookId[0] || pages <= 0) return 0;
+    for (int i = 1; i <= pages; i++) {
+        offline_page_path(bookId, i, path, sizeof(path));
+        if (file_exists(path)) n++;
+    }
+    return n;
+}
+
+static SDL_Texture *texture_from_rw(SDL_RWops *rw) {
+    SDL_Texture *tex = NULL;
+    if (!rw) return NULL;
+    SDL_Surface *surf = IMG_Load_RW(rw, 1);
+    if (surf) {
+        tex = SDL_CreateTextureFromSurface(gRen, surf);
+        if (tex) SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+        SDL_FreeSurface(surf);
+    }
+    return tex;
+}
+
 static SDL_Texture *load_page(const char *baseUrl, int page) {
+    char local[320];
+    if (curBookId[0]) {
+        offline_page_path(curBookId, page, local, sizeof(local));
+        if (file_exists(local)) {
+            SDL_Texture *localTex = texture_from_rw(SDL_RWFromFile(local, "rb"));
+            if (localTex) return localTex;
+        }
+        if (g_offline_mode) return NULL;
+    }
     char url[560];
     snprintf(url, sizeof(url), "%s%d", baseUrl, page);
     struct membuf buf = {0};
     long code = net_request(url, "GET", NULL, g_token, &buf, NULL);
     SDL_Texture *tex = NULL;
     if (code == 200 && buf.data && buf.len > 0) {
-        SDL_RWops *rw = SDL_RWFromConstMem(buf.data, (int)buf.len);
-        SDL_Surface *surf = IMG_Load_RW(rw, 1);
-        if (surf) {
-            tex = SDL_CreateTextureFromSurface(gRen, surf);
-            if (tex) SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
-            SDL_FreeSurface(surf);
-        }
+        tex = texture_from_rw(SDL_RWFromConstMem(buf.data, (int)buf.len));
     }
     membuf_free(&buf);
     return tex;
@@ -668,10 +743,96 @@ static int success_screen(const char *l1, const char *l2) {
     SDL_Color green = { 78, 190, 132, 255 };
     return modal_wait_loop("Meruem", l1, l2, NULL, green, "Toque ou A = continuar", 0);
 }
+static int info_screen(const char *l1, const char *l2) {
+    SDL_Color blue = { 96, 154, 232, 255 };
+    return modal_wait_loop("Meruem", l1, l2, NULL, blue, "Toque ou A = continuar", 0);
+}
 // A/toque = sim; B/+ = nao
 static int confirm_screen(const char *l1, const char *l2, const char *l3) {
     SDL_Color gold = { 238, 187, 92, 255 };
     return modal_wait_loop("Atualizacao Meruem", l1, l2, l3, gold, "A/toque = atualizar    B/+ = depois", 1);
+}
+
+static int offline_cancel_requested(void) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) return 1;
+        if (e.type == SDL_JOYBUTTONDOWN && (e.jbutton.button == JOY_B || e.jbutton.button == JOY_PLUS)) return 1;
+    }
+    return 0;
+}
+
+static void offline_progress_screen(int page, int pages, int done, int failed) {
+    char l1[160];
+    char l2[160];
+    char l3[160];
+    SDL_Color blue = { 96, 154, 232, 255 };
+    snprintf(l1, sizeof(l1), "Baixando capitulo %s", curChapLabel[0] ? curChapLabel : "");
+    snprintf(l2, sizeof(l2), "Pagina %d/%d", page, pages);
+    snprintf(l3, sizeof(l3), "Salvas: %d    Falhas: %d", done, failed);
+    draw_modal_box("Leitura offline", l1, l2, l3, blue, "B/+ = cancelar apos a pagina atual");
+}
+
+static void offline_download_current_chapter(void) {
+    char line[180];
+    int existing;
+    int saved = 0;
+    int failed = 0;
+    int cancelled = 0;
+    if (!curBookId[0] || !pageBase[0] || pageCount < 1) {
+        message_screen("Nao consegui identificar o capitulo.", "Abra o capitulo novamente e tente baixar.");
+        return;
+    }
+    existing = offline_count_pages(curBookId, pageCount);
+    snprintf(line, sizeof(line), "%d/%d paginas ja estao no SD.", existing, pageCount);
+    {
+        SDL_Color gold = { 238, 187, 92, 255 };
+        if (!modal_wait_loop("Leitura offline", "Baixar este capitulo para o SD?", line,
+                             "Depois ele abre mesmo sem internet.", gold,
+                             "A/toque = baixar    B/+ = depois", 1)) {
+            reader_show_overlay();
+            return;
+        }
+    }
+    offline_ensure_dirs(curBookId);
+    for (int p = 1; p <= pageCount; p++) {
+        char path[320];
+        char url[560];
+        offline_page_path(curBookId, p, path, sizeof(path));
+        if (file_exists(path)) {
+            saved++;
+            continue;
+        }
+        if (offline_cancel_requested()) { cancelled = 1; break; }
+        offline_progress_screen(p, pageCount, saved, failed);
+        snprintf(url, sizeof(url), "%s%d", pageBase, p);
+        long code = net_download_file(url, g_token, path, NULL);
+        if (code == 200) saved++;
+        else {
+            remove(path);
+            failed++;
+        }
+    }
+
+    {
+        SDL_Texture *newTex = load_page(pageBase, curPage);
+        if (newTex) {
+            if (pageTex) SDL_DestroyTexture(pageTex);
+            pageTex = newTex;
+        }
+    }
+    reader_show_overlay();
+    if (cancelled) {
+        snprintf(line, sizeof(line), "Salvas: %d/%d. Voce pode continuar depois.", offline_count_pages(curBookId, pageCount), pageCount);
+        info_screen("Download offline cancelado.", line);
+    } else if (failed > 0) {
+        snprintf(line, sizeof(line), "Salvas: %d/%d. Tente de novo para completar.", offline_count_pages(curBookId, pageCount), pageCount);
+        message_screen("Algumas paginas falharam.", line);
+    } else {
+        snprintf(line, sizeof(line), "%d paginas salvas no SD.", offline_count_pages(curBookId, pageCount));
+        success_screen("Capitulo pronto para ler offline.", line);
+    }
+    reader_show_overlay();
 }
 
 // Tela de boas-vindas / login. Retorna: 0 = sair, 1 = entrar, 2 = trocar conta.
@@ -742,8 +903,15 @@ static int authenticate(void) {
     char tok[512];
     if (store_load_token(tok, sizeof(tok))) {
         present_color(20, 20, 40);
-        if (token_is_valid(tok)) { g_token = strdup(tok); return 1; }
-        store_clear_token();
+        if (token_is_valid(tok)) {
+            g_offline_mode = 0;
+            g_token = strdup(tok);
+            return 1;
+        }
+        g_offline_mode = 1;
+        g_token = strdup(tok);
+        info_screen("Servidor indisponivel.", "Abrindo leituras salvas no modo offline.");
+        return 1;
     }
     int hasUser = store_load_user(g_username, sizeof(g_username));
     while (appletMainLoop()) {
@@ -861,6 +1029,14 @@ static void load_catalog(void) {
     catalogFavorites = 0;
     catalogLoadFailed = 0;
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
+    if (g_offline_mode) {
+        catCount = 0;
+        catTotal = 1;
+        catSel = 0;
+        catScroll = 0;
+        catalogLoadFailed = 1;
+        return;
+    }
     char url[512];
     int n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
                      g_server,
@@ -889,6 +1065,14 @@ static void load_favorites(void) {
     catalogFavorites = 1;
     catalogLoadFailed = 0;
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
+    if (g_offline_mode) {
+        catCount = 0;
+        catTotal = 1;
+        catSel = 0;
+        catScroll = 0;
+        catalogLoadFailed = 1;
+        return;
+    }
     char url[512];
     snprintf(url, sizeof(url), "%s/switch/favorites?size=%d&page=%d", g_server, PAGE_SIZE, catPage);
     struct membuf r = {0};
@@ -1061,7 +1245,7 @@ static void enter_reader_from_record(const char *bookId) {
     pageCount = pages < 1 ? 1 : pages;
     curPage = page; if (curPage > pageCount) curPage = pageCount; if (curPage < 1) curPage = 1;
     curChapIndex = -1;
-    if (sid[0]) {
+    if (sid[0] && !g_offline_mode) {
         if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
         char url[512];
         snprintf(url, sizeof(url), "%s/switch/series/%s", g_server, sid);
@@ -1383,11 +1567,15 @@ static void render_chapters(void) {
         cJSON *c = chap_at(idx);
         const char *num = json_str(c, "number", "?");
         const char *tt = json_str(c, "title", "");
-        int prog = store_get_progress(json_str(c, "id", ""));
+        const char *bid = json_str(c, "id", "");
+        int prog = store_get_progress(bid);
+        int pages = json_int(c, "pages", 0);
+        int off = offline_count_pages(bid, pages);
         char row[320];
         char meta[160];
         snprintf(row, sizeof(row), "#%s  %.40s", num, tt[0] ? tt : "Capitulo");
-        snprintf(meta, sizeof(meta), "%d paginas%s", json_int(c, "pages", 0), prog > 1 ? "  em andamento" : "");
+        if (off > 0) snprintf(meta, sizeof(meta), "%d paginas  offline %d/%d%s", pages, off, pages, prog > 1 ? "  em andamento" : "");
+        else         snprintf(meta, sizeof(meta), "%d paginas%s", pages, prog > 1 ? "  em andamento" : "");
         text_draw(gRen, row, 24, y + 8, idx == chapSel ? COL_SEL : COL_TEXT, 0);
         text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
     }
@@ -1400,10 +1588,11 @@ static void render_continue(void) {
     draw_background();
     g_cover_started_this_frame = 0;
     cover_cache_pump();
-    draw_topbar("Continuar lendo", btn_library());
+    draw_topbar(g_offline_mode ? "Continuar lendo (offline)" : "Continuar lendo", btn_library());
     int vis = visible_rows();
     if (contN == 0) {
-        draw_empty_state("Nada por aqui ainda", "Abra a Biblioteca e escolha um capitulo.");
+        draw_empty_state(g_offline_mode ? "Nada salvo offline" : "Nada por aqui ainda",
+                         g_offline_mode ? "Baixe capitulos antes de sair da internet." : "Abra a Biblioteca e escolha um capitulo.");
     }
     for (int i = 0; i < vis; i++) {
         int idx = contScroll + i;
@@ -1416,9 +1605,11 @@ static void render_continue(void) {
         char row[360];
         char meta[160];
         int pct = pages > 0 ? (page * 100) / pages : 0;
+        int off = offline_count_pages(contIds[idx], pages);
         if (pct > 100) pct = 100;
         snprintf(row, sizeof(row), "%.34s", st[0] ? st : "(serie)");
-        snprintf(meta, sizeof(meta), "%s  pagina %d/%d  %d%%", cl, page, pages, pct);
+        if (off > 0) snprintf(meta, sizeof(meta), "%s  pagina %d/%d  offline %d/%d", cl, page, pages, off, pages);
+        else         snprintf(meta, sizeof(meta), "%s  pagina %d/%d  %d%%", cl, page, pages, pct);
         SDL_Texture *cover = cover_texture_for_key(contIds[idx], cv);
         if (cover) draw_cover_texture(cover, 22, y + 7, 42, 60);
         else       draw_cover_placeholder(22, y + 7, 42, 60, st[0] ? st : "?");
@@ -1437,9 +1628,15 @@ static void render_reader(void) {
         reader_page_rect(&dst);
         SDL_RenderCopy(gRen, pageTex, NULL, &dst);
     } else {
-        SDL_SetRenderDrawColor(gRen, 90, 0, 120, 255);
-        SDL_Rect r = { LW()/2 - 160, LH()/2 - 40, 320, 80 };
+        SDL_SetRenderDrawColor(gRen, 20, 24, 36, 255);
+        SDL_Rect r = { LW()/2 - 250, LH()/2 - 70, 500, 140 };
         SDL_RenderFillRect(gRen, &r);
+        SDL_SetRenderDrawColor(gRen, 238, 187, 92, 220);
+        SDL_RenderDrawRect(gRen, &r);
+        text_draw(gRen, g_offline_mode ? "Pagina nao salva offline" : "Nao consegui carregar a pagina",
+                  r.x + 28, r.y + 34, COL_HEAD, 1);
+        text_draw(gRen, g_offline_mode ? "Baixe o capitulo antes de sair da internet." : "Tente avancar/voltar ou recarregar depois.",
+                  r.x + 28, r.y + 86, COL_SOFT, 0);
     }
     int overlay = SDL_GetTicks() < reader_overlay_until;
     if (overlay) {
@@ -1447,12 +1644,19 @@ static void render_reader(void) {
         SDL_Rect bar = { 0, 0, LW(), TB };
         SDL_RenderFillRect(gRen, &bar);
         btn_draw(btn_back());
+        btn_draw(btn_offline());
         btn_draw(btn_rotate());
         char pc[160];
-        int maxPcW = btn_rotate().x - (btn_back().x + btn_back().w + 24);
+        int maxPcW = btn_offline().x - (btn_back().x + btn_back().w + 24);
         snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
         text_draw(gRen, pc, btn_back().x + btn_back().w + 14, 12, COL_SEL, 0);
         (void)maxPcW;
+        {
+            int off = offline_count_pages(curBookId, pageCount);
+            char st[80];
+            snprintf(st, sizeof(st), "X: offline  %d/%d no SD", off, pageCount);
+            text_draw(gRen, st, 18, LH() - 48, off == pageCount ? COL_HEAD : COL_DIM, 0);
+        }
     }
     if (next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) {
         Uint32 elapsed = SDL_GetTicks() - next_prompt_started;
@@ -1552,6 +1756,7 @@ static void handle_tap(int lx, int ly) {
         int overlay = SDL_GetTicks() < reader_overlay_until;
         if (overlay && ly < TB) {
             if (btn_hit(btn_back(), lx, ly)) { if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; } screen = g_reader_back; return; }
+            if (btn_hit(btn_offline(), lx, ly)) { offline_download_current_chapter(); return; }
             if (btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); reader_clamp_pan(); reader_show_overlay(); return; }
             return;
         }
@@ -1857,6 +2062,7 @@ int main(int argc, char **argv) {
                         } else {
                             if (b == JOY_A && next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) reader_open_next_chapter_now();
                             else if (b == JOY_X && next_prompt_started) { next_prompt_cancelled = 1; next_prompt_started = 0; reader_show_overlay(); }
+                            else if (b == JOY_X) offline_download_current_chapter();
                             else if (b == JOY_R || b == JOY_DRIGHT || b == JOY_DOWN || b == JOY_A) reader_advance(1);
                             else if (b == JOY_L || b == JOY_DLEFT || b == JOY_UP) reader_advance(-1);
                             else if (b == JOY_B) { if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; } screen = g_reader_back; }
