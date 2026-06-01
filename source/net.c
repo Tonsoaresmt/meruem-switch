@@ -1,0 +1,164 @@
+// net.c - implementacao da camada de HTTP (libcurl).
+#include "net.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <curl/curl.h>
+
+// User-Agent de navegador: o Cloudflare do servidor bloqueia UAs "de bot".
+// TODO: trocar por "Meruem-Switch/x" + regra de allowlist no Cloudflare.
+#define USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " \
+                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+void membuf_free(struct membuf *m) {
+    if (!m) return;
+    free(m->data);
+    m->data = NULL;
+    m->len = 0;
+}
+
+static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t add = size * nmemb;
+    struct membuf *m = (struct membuf *)userdata;
+    char *np = realloc(m->data, m->len + add + 1);
+    if (!np) return 0;                 // sem memoria -> aborta o download
+    m->data = np;
+    memcpy(m->data + m->len, ptr, add);
+    m->len += add;
+    m->data[m->len] = '\0';
+    return add;
+}
+
+static size_t file_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    FILE *f = (FILE *)userdata;
+    return fwrite(ptr, size, nmemb, f);
+}
+
+int net_init(void) {
+    return curl_global_init(CURL_GLOBAL_DEFAULT) == 0 ? 0 : -1;
+}
+
+void net_exit(void) {
+    curl_global_cleanup();
+}
+
+long net_request(const char *url, const char *method,
+                 const char *body, const char *bearer,
+                 struct membuf *out, const char **err) {
+    if (err) *err = NULL;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) { if (err) *err = "curl_easy_init falhou"; return -1; }
+
+    // Sem "Accept" fixo: assim o mesmo helper serve para JSON e para imagens.
+    struct curl_slist *headers = NULL;
+    if (body) headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    char authbuf[160];
+    if (bearer && bearer[0]) {
+        snprintf(authbuf, sizeof(authbuf), "Authorization: Bearer %s", bearer);
+        headers = curl_slist_append(headers, authbuf);
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
+    // TODO (seguranca): verificar com cacert.pem no romfs em vez de desligar.
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, out);
+
+    if (method && strcmp(method, "POST") == 0) {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    long code;
+    if (res != CURLE_OK) {
+        if (err) *err = curl_easy_strerror(res);
+        code = -(long)res;
+    } else {
+        code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return code;
+}
+
+long net_download_file(const char *url, const char *bearer,
+                       const char *path, const char **err) {
+    CURL *curl;
+    CURLcode res;
+    struct curl_slist *headers = NULL;
+    char authbuf[160];
+    FILE *f;
+    long code = -1;
+
+    if (err) *err = NULL;
+    if (!path) {
+        if (err) *err = "path invalido";
+        return -1;
+    }
+
+    f = fopen(path, "wb");
+    if (!f) {
+        if (err) *err = "fopen falhou";
+        return -1;
+    }
+
+    curl = curl_easy_init();
+    if (!curl) {
+        fclose(f);
+        if (err) *err = "curl_easy_init falhou";
+        return -1;
+    }
+
+    if (bearer && bearer[0]) {
+        snprintf(authbuf, sizeof(authbuf), "Authorization: Bearer %s", bearer);
+        headers = curl_slist_append(headers, authbuf);
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 180L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, f);
+
+    res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        if (err) *err = curl_easy_strerror(res);
+        code = -(long)res;
+    } else {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    fclose(f);
+
+    if (code != 200) remove(path);
+    return code;
+}
+
+void net_urlencode(const char *in, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!in || !in[0]) return;
+    char *enc = curl_easy_escape(NULL, in, 0);
+    if (enc) {
+        snprintf(out, cap, "%s", enc);
+        curl_free(enc);
+    }
+}

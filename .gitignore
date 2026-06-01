@@ -1,0 +1,9 @@
+# Artefatos de build do devkitPro
+/build/
+*.elf
+*.nacp
+*.map
+Meruem.nro
+
+# Chaves do console — NUNCA versionar
+*.keys
