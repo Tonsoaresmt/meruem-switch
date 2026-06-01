@@ -26,9 +26,10 @@
 #define ROT_ANGLE 90.0     // <-- calibrar: 90.0 ou 270.0
 #define DEFAULT_SERVER "https://meruem.tonserverlocal.uk"
 
-#define TB        50       // altura da barra de topo
-#define LIST_Y    60
-#define ROW_H     44
+#define TB        58       // altura da barra de topo
+#define LIST_Y    76
+#define ROW_H     58
+#define FOOTER_H  58
 #define PAGE_SIZE 40
 #define TAP_THRESH 24      // movimento (px logicos) abaixo disso = toque, acima = arrasto
 
@@ -90,6 +91,7 @@ static const SDL_Color COL_TEXT = { 220, 220, 228, 255 };
 static const SDL_Color COL_SEL  = { 255, 255, 255, 255 };
 static const SDL_Color COL_HEAD = { 250, 215, 120, 255 };
 static const SDL_Color COL_DIM  = { 150, 150, 162, 255 };
+static const SDL_Color COL_SOFT = { 178, 196, 222, 255 };
 
 typedef struct { int x, y, w, h; const char *label; } Btn;
 
@@ -97,7 +99,7 @@ typedef struct { int x, y, w, h; const char *label; } Btn;
 static int LW(void) { return g_portrait ? 720 : 1280; }
 static int LH(void) { return g_portrait ? 1280 : 720; }
 static int visible_rows(void) {
-    int v = (LH() - LIST_Y - 56) / ROW_H;
+    int v = (LH() - LIST_Y - FOOTER_H - 12) / ROW_H;
     return v < 1 ? 1 : v;
 }
 
@@ -157,9 +159,14 @@ static void screen_to_logical(float nx, float ny, int *lx, int *ly) {
 
 // ---------------- desenho de botoes ----------------
 static void btn_draw(Btn b) {
-    SDL_SetRenderDrawColor(gRen, 38, 58, 98, 255);
+    SDL_SetRenderDrawColor(gRen, 12, 16, 26, 160);
+    SDL_Rect sh = { b.x + 2, b.y + 3, b.w, b.h };
+    SDL_RenderFillRect(gRen, &sh);
+    SDL_SetRenderDrawColor(gRen, 40, 62, 96, 255);
     SDL_Rect r = { b.x, b.y, b.w, b.h };
     SDL_RenderFillRect(gRen, &r);
+    SDL_SetRenderDrawColor(gRen, 84, 116, 160, 255);
+    SDL_RenderDrawRect(gRen, &r);
     int tw = 0, th = 0;
     SDL_Texture *t = text_make(gRen, b.label, COL_SEL, 0, &tw, &th);
     if (t) {
@@ -181,7 +188,74 @@ static Btn btn_search(void) { Btn b = { LW()/2 - 50, LH() - 50, 120, 40, "Buscar
 static Btn btn_prev(void)   { Btn b = { 6, LH() - 50, 110, 40, "< Pag" };  return b; }
 static Btn btn_next(void)   { Btn b = { LW() - 116, LH() - 50, 110, 40, "Pag >" }; return b; }
 static Btn btn_up(void)     { Btn b = { LW() - 76, TB + 8, 68, 64, "/\\" }; return b; }
-static Btn btn_down(void)   { Btn b = { LW() - 76, LH() - 76, 68, 64, "\\/" }; return b; }
+static Btn btn_down(void)   { Btn b = { LW() - 76, LH() - FOOTER_H - 76, 68, 64, "\\/" }; return b; }
+
+static void draw_background(void) {
+    SDL_SetRenderDrawColor(gRen, 13, 16, 26, 255);
+    SDL_RenderClear(gRen);
+    SDL_SetRenderDrawColor(gRen, 20, 28, 43, 255);
+    SDL_Rect top = { 0, 0, LW(), LH() / 3 };
+    SDL_RenderFillRect(gRen, &top);
+    SDL_SetRenderDrawColor(gRen, 18, 22, 34, 255);
+    SDL_Rect mid = { 0, LH() / 3, LW(), LH() / 3 };
+    SDL_RenderFillRect(gRen, &mid);
+    SDL_SetRenderDrawColor(gRen, 11, 13, 20, 255);
+    SDL_Rect bot = { 0, (LH() * 2) / 3, LW(), LH() / 3 + 2 };
+    SDL_RenderFillRect(gRen, &bot);
+    SDL_SetRenderDrawColor(gRen, 238, 187, 92, 34);
+    SDL_Rect glow = { 0, 0, LW(), 5 };
+    SDL_RenderFillRect(gRen, &glow);
+}
+
+static void draw_footer(const char *hint) {
+    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 232);
+    SDL_Rect r = { 0, LH() - FOOTER_H, LW(), FOOTER_H };
+    SDL_RenderFillRect(gRen, &r);
+    SDL_SetRenderDrawColor(gRen, 52, 67, 92, 255);
+    SDL_RenderDrawLine(gRen, 0, r.y, LW(), r.y);
+    if (hint) text_draw(gRen, hint, 18, LH() - 41, COL_DIM, 0);
+}
+
+static void draw_empty_state(const char *title, const char *subtitle) {
+    SDL_SetRenderDrawColor(gRen, 25, 32, 48, 220);
+    SDL_Rect box = { 18, LIST_Y + 16, LW() - 36, 150 };
+    SDL_RenderFillRect(gRen, &box);
+    SDL_SetRenderDrawColor(gRen, 68, 84, 112, 255);
+    SDL_RenderDrawRect(gRen, &box);
+    if (title) text_draw(gRen, title, box.x + 24, box.y + 32, COL_SEL, 1);
+    if (subtitle) text_draw(gRen, subtitle, box.x + 24, box.y + 88, COL_DIM, 0);
+}
+
+static void draw_row_shell(int y, int selected) {
+    SDL_SetRenderDrawColor(gRen, selected ? 47 : 24, selected ? 74 : 31, selected ? 116 : 47, 242);
+    SDL_Rect row = { 12, y, LW() - 24, ROW_H - 6 };
+    SDL_RenderFillRect(gRen, &row);
+    SDL_SetRenderDrawColor(gRen, selected ? 248 : 52, selected ? 199 : 64, selected ? 91 : 84, 255);
+    SDL_RenderDrawRect(gRen, &row);
+    if (selected) {
+        SDL_SetRenderDrawColor(gRen, 250, 215, 120, 255);
+        SDL_Rect accent = { row.x, row.y, 5, row.h };
+        SDL_RenderFillRect(gRen, &accent);
+    }
+}
+
+static void draw_scrollbar(int scroll, int count, int vis) {
+    if (count <= vis) return;
+    int trackH = vis * ROW_H - 8;
+    int trackY = LIST_Y + 2;
+    int trackX = LW() - 10;
+    int thumbH = (trackH * vis) / count;
+    int maxScroll = count - vis;
+    int thumbY;
+    if (thumbH < 24) thumbH = 24;
+    thumbY = trackY + ((trackH - thumbH) * scroll) / (maxScroll > 0 ? maxScroll : 1);
+    SDL_SetRenderDrawColor(gRen, 66, 74, 92, 130);
+    SDL_Rect track = { trackX, trackY, 4, trackH };
+    SDL_RenderFillRect(gRen, &track);
+    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 220);
+    SDL_Rect thumb = { trackX - 1, thumbY, 6, thumbH };
+    SDL_RenderFillRect(gRen, &thumb);
+}
 
 // ---------------- rede ----------------
 static char *login_request(const char *user, const char *pass) {
@@ -475,101 +549,104 @@ static void reader_goto(int n) {
 
 // ---------------- render ----------------
 static void draw_topbar(const char *title, Btn left) {
-    SDL_SetRenderDrawColor(gRen, 26, 30, 44, 255);
+    SDL_SetRenderDrawColor(gRen, 16, 20, 31, 245);
     SDL_Rect bar = { 0, 0, LW(), TB };
     SDL_RenderFillRect(gRen, &bar);
+    SDL_SetRenderDrawColor(gRen, 54, 70, 96, 255);
+    SDL_RenderDrawLine(gRen, 0, TB - 1, LW(), TB - 1);
     btn_draw(left);
     btn_draw(btn_rotate());
     if (title) text_draw(gRen, title, left.x + left.w + 16, 12, COL_HEAD, 0);
 }
 
 static void render_series(void) {
-    SDL_SetRenderDrawColor(gRen, 16, 16, 24, 255);
-    SDL_RenderClear(gRen);
+    draw_background();
     char hd[200];
-    if (g_search[0]) snprintf(hd, sizeof(hd), "%s b:%.16s (%d/%d)", AREAS[areaIdx], g_search, catPage + 1, catTotal);
-    else             snprintf(hd, sizeof(hd), "%s  (pag %d/%d)", AREAS[areaIdx], catPage + 1, catTotal);
-    SDL_SetRenderDrawColor(gRen, 26, 30, 44, 255);
+    if (g_search[0]) snprintf(hd, sizeof(hd), "%s  busca: %.18s  pag %d/%d", AREAS[areaIdx], g_search, catPage + 1, catTotal);
+    else             snprintf(hd, sizeof(hd), "%s  pag %d/%d", AREAS[areaIdx], catPage + 1, catTotal);
+    SDL_SetRenderDrawColor(gRen, 16, 20, 31, 245);
     SDL_Rect tbar = { 0, 0, LW(), TB };
     SDL_RenderFillRect(gRen, &tbar);
+    SDL_SetRenderDrawColor(gRen, 54, 70, 96, 255);
+    SDL_RenderDrawLine(gRen, 0, TB - 1, LW(), TB - 1);
     btn_draw(btn_exit());
     btn_draw(btn_continue());
     btn_draw(btn_rotate());
     text_draw(gRen, hd, btn_continue().x + btn_continue().w + 12, 12, COL_HEAD, 0);
 
     int vis = visible_rows();
-    if (catCount == 0) text_draw(gRen, "(nenhuma serie)", 24, LIST_Y + 6, COL_DIM, 0);
+    if (catCount == 0) draw_empty_state("Nada encontrado", "Tente outra busca ou troque a area.");
     for (int i = 0; i < vis; i++) {
         int idx = catScroll + i;
         if (idx >= catCount) break;
         int y = LIST_Y + i * ROW_H;
-        if (idx == catSel) {
-            SDL_SetRenderDrawColor(gRen, 48, 78, 140, 255);
-            SDL_Rect hl = { 8, y, LW() - 16, ROW_H - 2 };
-            SDL_RenderFillRect(gRen, &hl);
-        }
+        draw_row_shell(y, idx == catSel);
         cJSON *s = cat_series_at(idx);
         char row[300];
+        char meta[160];
         snprintf(row, sizeof(row), "%s", json_str(s, "title", "(sem titulo)"));
-        text_draw(gRen, row, 20, y + 8, idx == catSel ? COL_SEL : COL_TEXT, 0);
+        snprintf(meta, sizeof(meta), "%d livros", json_int(s, "booksCount", 0));
+        text_draw(gRen, row, 24, y + 8, idx == catSel ? COL_SEL : COL_TEXT, 0);
+        text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
     }
+    draw_scrollbar(catScroll, catCount, vis);
+    draw_footer(NULL);
     btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search()); btn_draw(btn_next());
 }
 
 static void render_chapters(void) {
-    SDL_SetRenderDrawColor(gRen, 16, 16, 24, 255);
-    SDL_RenderClear(gRen);
+    draw_background();
     char hd[200];
     snprintf(hd, sizeof(hd), "%.30s (%d cap)", curSeriesTitle, chapCount);
     draw_topbar(hd, btn_back());
 
     int vis = visible_rows();
+    if (chapCount == 0) draw_empty_state("Sem capitulos", "Esta serie nao retornou capitulos.");
     for (int i = 0; i < vis; i++) {
         int idx = chapScroll + i;
         if (idx >= chapCount) break;
         int y = LIST_Y + i * ROW_H;
-        if (idx == chapSel) {
-            SDL_SetRenderDrawColor(gRen, 48, 78, 140, 255);
-            SDL_Rect hl = { 8, y, LW() - 16, ROW_H - 2 };
-            SDL_RenderFillRect(gRen, &hl);
-        }
+        draw_row_shell(y, idx == chapSel);
         cJSON *c = chap_at(idx);
         const char *num = json_str(c, "number", "?");
         const char *tt = json_str(c, "title", "");
         int prog = store_get_progress(json_str(c, "id", ""));
         char row[320];
-        if (prog > 1) snprintf(row, sizeof(row), "#%s  %.34s  (p%d)", num, tt, prog);
-        else          snprintf(row, sizeof(row), "#%s  %.40s", num, tt);
-        text_draw(gRen, row, 20, y + 8, idx == chapSel ? COL_SEL : COL_TEXT, 0);
+        char meta[160];
+        snprintf(row, sizeof(row), "#%s  %.40s", num, tt[0] ? tt : "Capitulo");
+        snprintf(meta, sizeof(meta), "%d paginas%s", json_int(c, "pages", 0), prog > 1 ? "  em andamento" : "");
+        text_draw(gRen, row, 24, y + 8, idx == chapSel ? COL_SEL : COL_TEXT, 0);
+        text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
     }
+    draw_scrollbar(chapScroll, chapCount, vis);
+    draw_footer("A/toque: ler    B: voltar    L/R: pular lista    ZL/ZR: girar");
     btn_draw(btn_up()); btn_draw(btn_down());
 }
 
 static void render_continue(void) {
-    SDL_SetRenderDrawColor(gRen, 16, 16, 24, 255);
-    SDL_RenderClear(gRen);
+    draw_background();
     draw_topbar("Continuar lendo", btn_library());
     int vis = visible_rows();
     if (contN == 0) {
-        text_draw(gRen, "Nada por aqui ainda.", 20, LIST_Y + 6, COL_DIM, 0);
-        text_draw(gRen, "Toque em Biblioteca pra escolher.", 20, LIST_Y + 6 + ROW_H, COL_DIM, 0);
+        draw_empty_state("Nada por aqui ainda", "Abra a Biblioteca e escolha um capitulo.");
     }
     for (int i = 0; i < vis; i++) {
         int idx = contScroll + i;
         if (idx >= contN) break;
         int y = LIST_Y + i * ROW_H;
-        if (idx == contSel) {
-            SDL_SetRenderDrawColor(gRen, 48, 78, 140, 255);
-            SDL_Rect hl = { 8, y, LW() - 16, ROW_H - 2 };
-            SDL_RenderFillRect(gRen, &hl);
-        }
+        draw_row_shell(y, idx == contSel);
         char st[256] = {0}, cl[64] = {0}, sid[96] = {0}, pb[512] = {0};
         int page = 1, pages = 1;
         store_entry(contIds[idx], sid, sizeof(sid), st, sizeof(st), cl, sizeof(cl), pb, sizeof(pb), &page, &pages);
         char row[360];
-        snprintf(row, sizeof(row), "%.30s  %s  (p%d/%d)", st[0] ? st : "(serie)", cl, page, pages);
-        text_draw(gRen, row, 20, y + 8, idx == contSel ? COL_SEL : COL_TEXT, 0);
+        char meta[160];
+        snprintf(row, sizeof(row), "%.34s", st[0] ? st : "(serie)");
+        snprintf(meta, sizeof(meta), "%s  pagina %d/%d", cl, page, pages);
+        text_draw(gRen, row, 24, y + 8, idx == contSel ? COL_SEL : COL_TEXT, 0);
+        text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
     }
+    draw_scrollbar(contScroll, contN, vis);
+    draw_footer("A/toque: continuar    B/Biblioteca: acervo    ZL/ZR: girar");
 }
 
 static void render_reader(void) {
@@ -600,6 +677,17 @@ static void render_reader(void) {
     char pc[80];
     snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
     text_draw(gRen, pc, btn_back().x + btn_back().w + 16, 12, COL_SEL, 0);
+    if (pageCount > 1) {
+        int barW = LW() - 36;
+        int filled = (barW * curPage) / pageCount;
+        SDL_SetRenderDrawColor(gRen, 26, 30, 44, 210);
+        SDL_Rect bg = { 18, LH() - 22, barW, 7 };
+        SDL_RenderFillRect(gRen, &bg);
+        SDL_SetRenderDrawColor(gRen, 250, 215, 120, 240);
+        SDL_Rect fg = { 18, LH() - 22, filled, 7 };
+        SDL_RenderFillRect(gRen, &fg);
+    }
+    text_draw(gRen, "Toque esquerda/direita para virar", 18, LH() - 52, COL_DIM, 0);
 }
 
 // ---------------- toque: dispatch de tap ----------------
