@@ -583,6 +583,7 @@ static void write_update_log(int rc, const struct update_info *info) {
     FILE *f = fopen("sdmc:/switch/Meruem/update.log", "wb");
     if (!f) return;
     fprintf(f, "current=%s\n", APP_VERSION_STR);
+    fprintf(f, "target=%s\n", g_self_path);
     fprintf(f, "result=%d\n", rc);
     if (info) {
         fprintf(f, "http=%ld\n", info->http_code);

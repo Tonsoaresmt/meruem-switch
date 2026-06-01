@@ -58,6 +58,95 @@ static int has_repo_config(void) {
     return UPDATE_REPO_OWNER[0] && UPDATE_REPO_NAME[0];
 }
 
+static int same_path(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    return strcmp(a, b) == 0;
+}
+
+static void add_install_path(char paths[][640], int *count, const char *path) {
+    int i;
+    if (!paths || !count || !path || !path[0]) return;
+    for (i = 0; i < *count; i++) {
+        if (same_path(paths[i], path)) return;
+    }
+    if (*count >= 4) return;
+    snprintf(paths[*count], 640, "%s", path);
+    (*count)++;
+}
+
+static int copy_file(const char *src, const char *dst, char *err, size_t errcap) {
+    FILE *in = NULL;
+    FILE *out = NULL;
+    unsigned char buf[32 * 1024];
+    size_t n;
+
+    in = fopen(src, "rb");
+    if (!in) {
+        if (err && errcap) snprintf(err, errcap, "Nao abri o update baixado (%d).", errno);
+        return -1;
+    }
+    out = fopen(dst, "wb");
+    if (!out) {
+        if (err && errcap) snprintf(err, errcap, "Nao consegui gravar destino (%d).", errno);
+        fclose(in);
+        return -1;
+    }
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            if (err && errcap) snprintf(err, errcap, "Falha escrevendo destino (%d).", errno);
+            fclose(out);
+            fclose(in);
+            return -1;
+        }
+    }
+    if (ferror(in)) {
+        if (err && errcap) snprintf(err, errcap, "Falha lendo o update baixado (%d).", errno);
+        fclose(out);
+        fclose(in);
+        return -1;
+    }
+    fclose(out);
+    fclose(in);
+    return 0;
+}
+
+static int make_backup_path(const char *dst, char *bak, size_t cap) {
+    size_t len;
+    if (!dst || !bak || cap == 0) return -1;
+    len = strlen(dst);
+    if (len + 4 >= cap) return -1;
+    memcpy(bak, dst, len);
+    memcpy(bak + len, ".bak", 5);
+    return 0;
+}
+
+static int replace_with_file(const char *src, const char *dst, char *err, size_t errcap) {
+    char bak[640];
+    int renamed_old = 0;
+    if (!dst || !dst[0]) {
+        if (err && errcap) copy_text(err, errcap, "Caminho de destino vazio.");
+        return -1;
+    }
+    if (make_backup_path(dst, bak, sizeof(bak)) != 0) {
+        if (err && errcap) copy_text(err, errcap, "Caminho de destino grande demais.");
+        return -1;
+    }
+    remove(bak);
+    if (rename(dst, bak) == 0) {
+        renamed_old = 1;
+    } else if (errno != ENOENT) {
+        if (err && errcap) snprintf(err, errcap, "Nao preparei destino (%d).", errno);
+        return -1;
+    }
+    if (copy_file(src, dst, err, errcap) != 0) {
+        remove(dst);
+        if (renamed_old) rename(bak, dst);
+        return -1;
+    }
+    if (renamed_old) remove(bak);
+    return 0;
+}
+
 void update_resolve_target_path(const char *argv0, char *out, size_t cap) {
     if (!out || cap == 0) return;
     out[0] = '\0';
@@ -148,10 +237,15 @@ done:
 
 int update_apply(const struct update_info *info, const char *target_path, char *err, size_t errcap) {
     char tmp[640];
-    char bak[640];
+    char paths[4][640];
+    char first_err[256];
+    int path_count = 0;
+    int ok_count = 0;
+    int i;
     long code;
 
     if (err && errcap) err[0] = '\0';
+    first_err[0] = '\0';
     if (!info || !info->download_url[0]) {
         if (err && errcap) copy_text(err, errcap, "URL do asset nao disponivel.");
         return -1;
@@ -161,10 +255,8 @@ int update_apply(const struct update_info *info, const char *target_path, char *
         return -1;
     }
 
-    snprintf(tmp, sizeof(tmp), "%s.download", target_path);
-    snprintf(bak, sizeof(bak), "%s.bak", target_path);
+    snprintf(tmp, sizeof(tmp), "sdmc:/switch/Meruem/update.download");
     remove(tmp);
-    remove(bak);
 
     code = net_download_file(info->download_url, NULL, tmp, NULL);
     if (code != 200) {
@@ -173,20 +265,23 @@ int update_apply(const struct update_info *info, const char *target_path, char *
         return -1;
     }
 
-    if (rename(target_path, bak) != 0 && errno != ENOENT) {
-        if (err && errcap) snprintf(err, errcap, "Nao consegui preparar a troca do .nro (%d).", errno);
-        remove(tmp);
-        return -1;
+    add_install_path(paths, &path_count, target_path);
+    add_install_path(paths, &path_count, "sdmc:/switch/Meruem.nro");
+    add_install_path(paths, &path_count, "sdmc:/switch/Meruem/Meruem.nro");
+
+    for (i = 0; i < path_count; i++) {
+        char one_err[256] = {0};
+        if (replace_with_file(tmp, paths[i], one_err, sizeof(one_err)) == 0) {
+            ok_count++;
+        } else if (!first_err[0]) {
+            copy_text(first_err, sizeof(first_err), one_err);
+        }
     }
 
-    if (rename(tmp, target_path) != 0) {
-        int rename_err = errno;
-        rename(bak, target_path);
-        if (err && errcap) snprintf(err, errcap, "Nao consegui gravar o novo .nro (%d).", rename_err);
-        remove(tmp);
+    remove(tmp);
+    if (ok_count <= 0) {
+        if (err && errcap) copy_text(err, errcap, first_err[0] ? first_err : "Nao consegui gravar o novo .nro.");
         return -1;
     }
-
-    remove(bak);
     return 0;
 }
