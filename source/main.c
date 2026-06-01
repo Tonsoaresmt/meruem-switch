@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <SDL.h>
 #include <SDL_image.h>
 #include <switch.h>
@@ -33,6 +34,11 @@
 #define PAGE_SIZE 40
 #define TAP_THRESH 24      // movimento (px logicos) abaixo disso = toque, acima = arrasto
 #define COVER_CACHE_MAX 48
+#define READER_ZOOM_MIN 1.0f
+#define READER_ZOOM_MAX 4.0f
+#define READER_PINCH_DEADZONE 0.12f
+#define READER_OVERLAY_MS 2200
+#define NEXT_CHAPTER_MS 5000
 
 #define JOY_A      0
 #define JOY_B      1
@@ -57,6 +63,7 @@ static int g_portrait = 1;
 
 static char *g_token = NULL;
 static char g_server[256] = {0};
+static char g_username[96] = {0};
 static const char *AREAS[3] = { "manga", "comics", "books" };
 static int areaIdx = 0;
 static char g_search[96] = {0};
@@ -70,6 +77,7 @@ static cJSON *g_ser = NULL;
 static int chapCount = 0, chapSel = 0, chapScroll = 0;
 static char curSeriesTitle[256] = {0};
 static char curSeriesId[96] = {0};
+static char curSeriesCover[640] = {0};
 static Screen g_reader_back = SC_CHAPTERS;   // pra onde o leitor volta no B
 
 // "Continuar lendo"
@@ -82,6 +90,12 @@ static char curBookId[96] = {0};
 static int pageCount = 1, curPage = 1;
 static SDL_Texture *pageTex = NULL;
 static char g_self_path[512] = {0};
+static int curChapIndex = -1;
+static float rd_zoom = READER_ZOOM_MIN;
+static float rd_pan_x = 0.0f, rd_pan_y = 0.0f;
+static Uint32 reader_overlay_until = 0;
+static int next_prompt_cancelled = 0;
+static Uint32 next_prompt_started = 0;
 
 typedef struct {
     char id[96];
@@ -104,6 +118,27 @@ static int  fingerDown = 0;
 static int  downLX = 0, downLY = 0, lastLY = 0, movedMax = 0;
 static float dragAccum = 0.0f;
 
+typedef struct {
+    int active;
+    SDL_FingerID id;
+    int x, y;
+    int startX, startY;
+} TouchSlot;
+
+static TouchSlot readerTouches[2];
+static int readerSwipeMoved = 0;
+static int readerPinching = 0;
+static int readerPinchLive = 0;
+static float readerPinchBaseDist = 0.0f;
+static float readerPinchBaseZoom = 1.0f;
+
+static void enter_reader(int idx);
+static void reader_reset_view(void);
+static void reader_start_next_prompt(void);
+static void reader_clamp_pan(void);
+static void reader_open_next_chapter_now(void);
+static int reader_has_next_chapter(void);
+
 static const SDL_Color COL_TEXT = { 220, 220, 228, 255 };
 static const SDL_Color COL_SEL  = { 255, 255, 255, 255 };
 static const SDL_Color COL_HEAD = { 250, 215, 120, 255 };
@@ -117,6 +152,16 @@ static int LW(void) { return g_portrait ? 720 : 1280; }
 static int LH(void) { return g_portrait ? 1280 : 720; }
 static int visible_rows(void) {
     int v = (LH() - LIST_Y - FOOTER_H - 12) / ROW_H;
+    return v < 1 ? 1 : v;
+}
+// ---- grade de capas (tela de series) ----
+static int grid_cols(void) { return g_portrait ? 3 : 5; }
+static int grid_gap(void) { return 14; }
+static int grid_card_w(void) { int cols = grid_cols(); return (LW() - grid_gap() * (cols + 1)) / cols; }
+static int grid_cover_h(void) { return (int)(grid_card_w() * 1.45f); }
+static int grid_cell_h(void) { return grid_cover_h() + 42; }
+static int grid_visible_rows(void) {
+    int v = (LH() - LIST_Y - FOOTER_H - 6) / grid_cell_h();
     return v < 1 ? 1 : v;
 }
 
@@ -206,6 +251,8 @@ static Btn btn_prev(void)   { Btn b = { 6, LH() - 50, 110, 40, "< Pag" };  retur
 static Btn btn_next(void)   { Btn b = { LW() - 116, LH() - 50, 110, 40, "Pag >" }; return b; }
 static Btn btn_up(void)     { Btn b = { LW() - 76, TB + 8, 68, 64, "/\\" }; return b; }
 static Btn btn_down(void)   { Btn b = { LW() - 76, LH() - FOOTER_H - 76, 68, 64, "\\/" }; return b; }
+static Btn btn_next_open(void) { Btn b = { LW()/2 - 210, LH()/2 + 44, 190, 46, "Abrir agora" }; return b; }
+static Btn btn_next_cancel(void) { Btn b = { LW()/2 + 20, LH()/2 + 44, 170, 46, "Cancelar" }; return b; }
 
 static void draw_background(void) {
     SDL_SetRenderDrawColor(gRen, 13, 16, 26, 255);
@@ -422,9 +469,7 @@ static void cover_cache_pump(void) {
     }
 }
 
-static SDL_Texture *series_cover_texture(cJSON *series) {
-    const char *id = json_str(series, "id", "");
-    const char *cover = json_str(series, "cover", "");
+static SDL_Texture *cover_texture_for_key(const char *id, const char *cover) {
     int empty = -1;
     if (!id[0] || !cover[0]) return NULL;
     for (int i = 0; i < COVER_CACHE_MAX; i++) {
@@ -450,6 +495,10 @@ static SDL_Texture *series_cover_texture(cJSON *series) {
         g_cover_cache[empty].failed = 1;
     }
     return NULL;
+}
+
+static SDL_Texture *series_cover_texture(cJSON *series) {
+    return cover_texture_for_key(json_str(series, "id", ""), json_str(series, "cover", ""));
 }
 
 // ---------------- teclado / login ----------------
@@ -548,33 +597,64 @@ static int confirm_screen(const char *l1, const char *l2, const char *l3) {
     return modal_wait_loop("Atualizacao Meruem", l1, l2, l3, gold, "A/toque = atualizar    B/+ = depois", 1);
 }
 
-static int login_intro_screen(void) {
+// Tela de boas-vindas / login. Retorna: 0 = sair, 1 = entrar, 2 = trocar conta.
+static int login_welcome_screen(int hasUser, const char *user) {
     SDL_Event e;
+    Uint32 shown = SDL_GetTicks();
     while (appletMainLoop()) {
+        int bw = LW() - 56;
+        int bx = 28, by = 120;
+        int bh = LH() - 240;
+        if (bh > 560) bh = 560;
+        Btn enter = { bx + 28, by + bh - 150, bw - 56, 58, hasUser ? "Entrar" : "Ja tenho conta - Entrar" };
+        Btn swap  = { bx + 28, by + bh - 82,  bw - 56, 48, "Trocar conta" };
+
         while (SDL_PollEvent(&e)) {
+            int ready = (SDL_GetTicks() - shown) > 400;
             if (e.type == SDL_QUIT) return 0;
-            if (e.type == SDL_FINGERUP) return 1;
+            if (!ready) continue;
+            if (e.type == SDL_FINGERUP) {
+                int lx, ly;
+                screen_to_logical(e.tfinger.x, e.tfinger.y, &lx, &ly);
+                if (btn_hit(enter, lx, ly)) return 1;
+                if (hasUser && btn_hit(swap, lx, ly)) return 2;
+            }
             if (e.type == SDL_JOYBUTTONDOWN) {
-                if (e.jbutton.button == JOY_PLUS || e.jbutton.button == JOY_B) return 0;
                 if (e.jbutton.button == JOY_A) return 1;
+                if (e.jbutton.button == JOY_PLUS || e.jbutton.button == JOY_B) return 0;
+                if (hasUser && e.jbutton.button == JOY_Y) return 2;
             }
         }
+
         begin_frame();
         draw_background();
-        SDL_SetRenderDrawColor(gRen, 22, 30, 46, 235);
-        SDL_Rect box = { 28, 150, LW() - 56, 420 };
+        SDL_SetRenderDrawColor(gRen, 22, 30, 46, 240);
+        SDL_Rect box = { bx, by, bw, bh };
         SDL_RenderFillRect(gRen, &box);
         SDL_SetRenderDrawColor(gRen, 76, 96, 130, 255);
         SDL_RenderDrawRect(gRen, &box);
-        text_draw(gRen, "Entrar no Meruem", box.x + 28, box.y + 28, COL_HEAD, 1);
-        text_draw(gRen, "Antes de usar no Switch,", box.x + 28, box.y + 96, COL_TEXT, 0);
-        text_draw(gRen, "crie sua conta no site.", box.x + 28, box.y + 128, COL_TEXT, 0);
-        text_draw(gRen, "1. No celular ou PC, abra:", box.x + 28, box.y + 172, COL_SOFT, 0);
-        text_draw(gRen, DEFAULT_SERVER, box.x + 28, box.y + 210, COL_SEL, 0);
-        text_draw(gRen, "2. Crie sua conta ou confirme seu login.", box.x + 28, box.y + 264, COL_SOFT, 0);
-        text_draw(gRen, "3. Volte aqui e use o mesmo usuario.", box.x + 28, box.y + 318, COL_SOFT, 0);
-        text_draw(gRen, "A senha sera pedida na proxima tela.", box.x + 28, box.y + 350, COL_SOFT, 0);
-        text_draw(gRen, "A ou toque: ja tenho conta    B/+: sair", box.x + 28, box.y + 390, COL_DIM, 0);
+        SDL_SetRenderDrawColor(gRen, 250, 215, 120, 255);
+        SDL_Rect stripe = { bx, by, bw, 7 };
+        SDL_RenderFillRect(gRen, &stripe);
+
+        text_draw(gRen, "Meruem", bx + 28, by + 30, COL_HEAD, 1);
+        if (hasUser) {
+            char line[160];
+            text_draw(gRen, "Bem-vindo de volta!", bx + 28, by + 96, COL_TEXT, 0);
+            snprintf(line, sizeof(line), "Conta: %s", user);
+            text_draw(gRen, line, bx + 28, by + 140, COL_SEL, 0);
+            text_draw(gRen, "Toque em Entrar e digite sua senha.", bx + 28, by + 186, COL_SOFT, 0);
+        } else {
+            text_draw(gRen, "Bem-vindo! Para ler no Switch:", bx + 28, by + 96, COL_TEXT, 0);
+            text_draw(gRen, "1) No celular/PC, crie sua conta em:", bx + 28, by + 142, COL_SOFT, 0);
+            text_draw(gRen, g_server[0] ? g_server : DEFAULT_SERVER, bx + 28, by + 178, COL_SEL, 0);
+            text_draw(gRen, "2) Volte aqui e toque em Entrar.", bx + 28, by + 224, COL_SOFT, 0);
+        }
+        btn_draw(enter);
+        if (hasUser) btn_draw(swap);
+        text_draw(gRen, hasUser ? "A: entrar    Y: trocar conta    B/+: sair"
+                                : "A/toque: entrar    B/+: sair",
+                  bx + 28, by + bh - 26, COL_DIM, 0);
         end_frame();
         SDL_Delay(16);
     }
@@ -588,19 +668,33 @@ static int authenticate(void) {
         if (token_is_valid(tok)) { g_token = strdup(tok); return 1; }
         store_clear_token();
     }
-    if (!login_intro_screen()) return 0;
+    int hasUser = store_load_user(g_username, sizeof(g_username));
     while (appletMainLoop()) {
+        int act = login_welcome_screen(hasUser, g_username);
+        if (act == 0) return 0;
+        if (act == 2) { store_clear_user(); g_username[0] = '\0'; hasUser = 0; continue; }
+
         char user[96] = {0}, pass[96] = {0};
-        int ru = prompt_text("Usuario ou e-mail da conta Meruem", user, sizeof(user), 0);
-        if (ru == -1) return 0;
-        if (ru == -2) continue;
+        if (hasUser) {
+            snprintf(user, sizeof(user), "%s", g_username);
+        } else {
+            int ru = prompt_text("Usuario ou e-mail da conta Meruem", user, sizeof(user), 0);
+            if (ru != 0) continue;   // cancelou/vazio -> volta ao welcome
+        }
         int rp = prompt_text("Senha da conta Meruem", pass, sizeof(pass), 1);
-        if (rp == -1) return 0;
-        if (rp == -2) continue;
+        if (rp != 0) continue;
+
         present_color(20, 20, 40);
         g_token = login_request(user, pass);
-        if (g_token) { store_save_token(g_token); return 1; }
-        if (!message_screen("Login falhou. Verifique usuario/senha.", "Se ainda nao tem conta, crie no site primeiro.")) return 0;
+        if (g_token) {
+            store_save_token(g_token);
+            snprintf(g_username, sizeof(g_username), "%s", user);
+            store_save_user(g_username);
+            return 1;
+        }
+        message_screen("Login falhou. Verifique usuario/senha.",
+                       hasUser ? "Use 'Trocar conta' se o usuario estiver errado." : "Se ainda nao tem conta, crie no site primeiro.");
+        hasUser = store_load_user(g_username, sizeof(g_username));
     }
     return 0;
 }
@@ -622,38 +716,42 @@ static void write_update_log(int rc, const struct update_info *info) {
 
 static int maybe_install_update(void) {
     struct update_info info;
-    char line1[160];
-    char line2[200];
+    char line1[200];
+    char line2[600];
     char err[256];
+    char seen[40] = {0};
     int rc;
 
     present_color(20, 20, 40);
     {
         SDL_Color blue = { 96, 154, 232, 255 };
-        draw_modal_box("Atualizacao Meruem", "Procurando atualizacoes...",
-                       "Versao atual: " APP_VERSION_STR, "Consultando GitHub Releases", blue, NULL);
+        draw_modal_box("Meruem", "Verificando atualizacoes...",
+                       "Versao atual: " APP_VERSION_STR, NULL, blue, NULL);
     }
-    SDL_Delay(700);
+    SDL_Delay(450);
     rc = update_check(&info);
     write_update_log(rc, &info);
-    if (rc == UPDATE_CHECK_DISABLED || rc == UPDATE_CHECK_UP_TO_DATE) return 0;
-    if (rc == UPDATE_CHECK_ERROR) {
-        message_screen("Nao consegui consultar atualizacoes.", info.message[0] ? info.message : "O app vai continuar normalmente.");
+    // Atualizado, erro de rede ou sem repo configurado: segue sem incomodar.
+    if (rc != UPDATE_CHECK_AVAILABLE) return 0;
+
+    // Ja perguntamos (instalou ou adiou) sobre ESTA versao? Nao perturba de novo.
+    store_load_update_seen(seen, sizeof(seen));
+    if (seen[0] && strcmp(seen, info.latest_version) == 0) return 0;
+
+    snprintf(line1, sizeof(line1), "Nova versao: %s   (atual %s)", info.latest_version, APP_VERSION_STR);
+    snprintf(line2, sizeof(line2), "Instala em: %s", g_self_path[0] ? g_self_path : "(padrao)");
+    if (!confirm_screen(line1, line2, "Baixar e trocar o .nro agora?")) {
+        store_save_update_seen(info.latest_version);   // "depois": nao pergunta de novo nesta versao
         return 0;
     }
-
-    snprintf(line1, sizeof(line1), "Nova versao encontrada: %s", info.latest_version);
-    snprintf(line2, sizeof(line2), "Atual: %s    Asset: %s", APP_VERSION_STR,
-             info.asset_name[0] ? info.asset_name : "(sem nome)");
-    if (!confirm_screen(line1, line2, "Baixar e trocar o .nro agora?")) return 0;
 
     present_color(20, 20, 40);
     if (update_apply(&info, g_self_path, err, sizeof(err)) != 0) {
-        message_screen("Falha ao instalar a atualizacao.", err[0] ? err : info.message);
-        return 0;
+        message_screen("Falha ao instalar.", err[0] ? err : info.message);
+        return 0;   // nao marca: permite tentar de novo no proximo boot
     }
-
-    success_screen("Atualizacao instalada com sucesso.", "Feche o app e abra novamente.");
+    store_save_update_seen(info.latest_version);
+    success_screen("Atualizacao instalada!", "Feche e abra o Meruem novamente.");
     return 1;
 }
 
@@ -682,6 +780,7 @@ static int configure_server(void) {
 // ---------------- dados ----------------
 static void load_catalog(void) {
     present_color(20, 20, 40);
+    cover_cache_clear();   // libera as capas da pagina anterior
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
     char url[512];
     int n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
@@ -711,6 +810,14 @@ static void enter_series(int idx) {
     if (!id[0]) return;
     snprintf(curSeriesId, sizeof(curSeriesId), "%s", id);
     snprintf(curSeriesTitle, sizeof(curSeriesTitle), "%s", json_str(s, "title", "Serie"));
+    const char *cover = json_str(s, "cover", "");
+    if (cover[0] && (strncmp(cover, "http://", 7) == 0 || strncmp(cover, "https://", 8) == 0)) {
+        snprintf(curSeriesCover, sizeof(curSeriesCover), "%s", cover);
+    } else if (cover[0]) {
+        snprintf(curSeriesCover, sizeof(curSeriesCover), "%s%s", g_server, cover);
+    } else {
+        curSeriesCover[0] = '\0';
+    }
     present_color(20, 20, 40);
     if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
     char url[512];
@@ -733,35 +840,67 @@ static void enter_reader(int idx) {
     if (pageCount < 1) pageCount = 1;
     snprintf(curChapLabel, sizeof(curChapLabel), "#%s", json_str(c, "number", "?"));
     snprintf(curBookId, sizeof(curBookId), "%s", json_str(c, "id", ""));
+    curChapIndex = idx;
     curPage = store_get_progress(curBookId);
     if (curPage > pageCount) curPage = pageCount;
     if (curPage < 1) curPage = 1;
     present_color(20, 20, 40);
     if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; }
     pageTex = load_page(pageBase, curPage);
+    reader_reset_view();
+    next_prompt_started = 0;
+    next_prompt_cancelled = 0;
+    reader_start_next_prompt();
     g_reader_back = SC_CHAPTERS;
-    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, pageCount);
+    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
     screen = SC_READER;
 }
 
 // Retoma a leitura a partir de um registro salvo (tela Continuar).
 static void enter_reader_from_record(const char *bookId) {
-    char sid[96] = {0}, st[256] = {0}, cl[64] = {0}, pb[512] = {0};
+    char sid[96] = {0}, st[256] = {0}, cl[64] = {0}, pb[512] = {0}, cv[640] = {0};
     int page = 1, pages = 1;
-    if (!store_entry(bookId, sid, sizeof(sid), st, sizeof(st), cl, sizeof(cl), pb, sizeof(pb), &page, &pages)) return;
+    if (!store_entry(bookId, sid, sizeof(sid), st, sizeof(st), cl, sizeof(cl), pb, sizeof(pb), cv, sizeof(cv), &page, &pages)) return;
     if (!pb[0]) return;
     snprintf(curBookId, sizeof(curBookId), "%s", bookId);
     snprintf(curSeriesId, sizeof(curSeriesId), "%s", sid);
     snprintf(curSeriesTitle, sizeof(curSeriesTitle), "%s", st);
+    snprintf(curSeriesCover, sizeof(curSeriesCover), "%s", cv);
     snprintf(curChapLabel, sizeof(curChapLabel), "%s", cl);
     snprintf(pageBase, sizeof(pageBase), "%s", pb);
     pageCount = pages < 1 ? 1 : pages;
     curPage = page; if (curPage > pageCount) curPage = pageCount; if (curPage < 1) curPage = 1;
+    curChapIndex = -1;
+    if (sid[0]) {
+        if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
+        char url[512];
+        snprintf(url, sizeof(url), "%s/switch/series/%s", g_server, sid);
+        struct membuf r = {0};
+        long code = net_request(url, "GET", NULL, g_token, &r, NULL);
+        if (code == 200 && r.data) g_ser = cJSON_Parse(r.data);
+        membuf_free(&r);
+        chapCount = 0; chapSel = 0; chapScroll = 0;
+        if (g_ser) {
+            chapCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"));
+            for (int i = 0; i < chapCount; i++) {
+                cJSON *c = chap_at(i);
+                if (c && strcmp(json_str(c, "id", ""), bookId) == 0) {
+                    curChapIndex = i;
+                    chapSel = i;
+                    break;
+                }
+            }
+        }
+    }
     present_color(20, 20, 40);
     if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; }
     pageTex = load_page(pageBase, curPage);
+    reader_reset_view();
+    next_prompt_started = 0;
+    next_prompt_cancelled = 0;
+    reader_start_next_prompt();
     g_reader_back = SC_CONTINUE;
-    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, pageCount);
+    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
     screen = SC_READER;
 }
 
@@ -771,15 +910,101 @@ static void load_continue(void) {
     if (contSel < 0) contSel = 0;
     contScroll = 0;
 }
-static void reader_goto(int n) {
+static void reader_show_overlay(void) {
+    reader_overlay_until = SDL_GetTicks() + READER_OVERLAY_MS;
+}
+
+static void reader_reset_touch(void) {
+    memset(readerTouches, 0, sizeof(readerTouches));
+    readerSwipeMoved = 0;
+    readerPinching = 0;
+    readerPinchLive = 0;
+    readerPinchBaseDist = 0.0f;
+    readerPinchBaseZoom = rd_zoom;
+}
+
+static void reader_clamp_pan(void) {
+    int tw = 0, th = 0;
+    if (!pageTex) { rd_pan_x = rd_pan_y = 0.0f; return; }
+    SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
+    if (tw <= 0 || th <= 0 || rd_zoom <= READER_ZOOM_MIN + 0.01f) {
+        rd_pan_x = rd_pan_y = 0.0f;
+        return;
+    }
+    float fit = (float)LW() / tw;
+    float fy = (float)LH() / th;
+    if (fy < fit) fit = fy;
+    float w = tw * fit * rd_zoom;
+    float h = th * fit * rd_zoom;
+    float maxX = w > LW() ? (w - LW()) * 0.5f : 0.0f;
+    float maxY = h > LH() ? (h - LH()) * 0.5f : 0.0f;
+    if (rd_pan_x < -maxX) rd_pan_x = -maxX;
+    if (rd_pan_x >  maxX) rd_pan_x =  maxX;
+    if (rd_pan_y < -maxY) rd_pan_y = -maxY;
+    if (rd_pan_y >  maxY) rd_pan_y =  maxY;
+}
+
+static void reader_reset_view(void) {
+    rd_zoom = READER_ZOOM_MIN;
+    rd_pan_x = rd_pan_y = 0.0f;
+    reader_reset_touch();
+    reader_show_overlay();
+}
+
+static void reader_page_rect(SDL_Rect *dst) {
+    int tw = 0, th = 0;
+    dst->x = dst->y = 0; dst->w = LW(); dst->h = LH();
+    if (!pageTex) return;
+    SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
+    if (tw <= 0 || th <= 0) return;
+    float scale = (float)LW() / tw;
+    float sh = (float)LH() / th;
+    if (sh < scale) scale = sh;
+    int w = (int)(tw * scale * rd_zoom);
+    int h = (int)(th * scale * rd_zoom);
+    dst->w = w; dst->h = h;
+    dst->x = (LW() - w) / 2 + (int)rd_pan_x;
+    dst->y = (LH() - h) / 2 + (int)rd_pan_y;
+}
+
+static int reader_has_next_chapter(void) {
+    return g_ser && curChapIndex >= 0 && curChapIndex + 1 < chapCount;
+}
+
+static void reader_start_next_prompt(void) {
+    if (curPage == pageCount && reader_has_next_chapter() && !next_prompt_cancelled && next_prompt_started == 0) {
+        next_prompt_started = SDL_GetTicks();
+    }
+}
+
+static void reader_open_page(int n, int atBottom) {
+    (void)atBottom;
     if (n < 1) n = 1;
     if (n > pageCount) n = pageCount;
-    if (n == curPage) return;
+    if (pageTex && n == curPage) { reader_start_next_prompt(); return; }
     curPage = n;
     present_color(20, 20, 40);
     if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; }
     pageTex = load_page(pageBase, curPage);
-    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, pageCount);
+    reader_reset_view();
+    next_prompt_started = 0;
+    next_prompt_cancelled = 0;
+    reader_start_next_prompt();
+    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
+}
+// dir > 0 = avancar; dir < 0 = voltar.
+static void reader_advance(int dir) {
+    reader_open_page(curPage + (dir > 0 ? 1 : -1), 0);
+}
+
+static void reader_open_next_chapter_now(void) {
+    if (!reader_has_next_chapter()) return;
+    enter_reader(curChapIndex + 1);
+}
+
+static void reader_tick(void) {
+    if (screen != SC_READER || !next_prompt_started || next_prompt_cancelled) return;
+    if (SDL_GetTicks() - next_prompt_started >= NEXT_CHAPTER_MS) reader_open_next_chapter_now();
 }
 
 // ---------------- render ----------------
@@ -832,25 +1057,36 @@ static void render_series(void) {
     draw_version_badge();
     text_draw(gRen, hd, btn_continue().x + btn_continue().w + 12, 12, COL_HEAD, 0);
 
-    int vis = visible_rows();
-    if (catCount == 0) draw_empty_state("Nada encontrado", "Tente outra busca ou troque a area.");
-    for (int i = 0; i < vis; i++) {
-        int idx = catScroll + i;
-        if (idx >= catCount) break;
-        int y = LIST_Y + i * ROW_H;
-        draw_row_shell(y, idx == catSel);
-        cJSON *s = cat_series_at(idx);
-        char row[300];
-        char meta[160];
-        snprintf(row, sizeof(row), "%s", json_str(s, "title", "(sem titulo)"));
-        snprintf(meta, sizeof(meta), "%d livros", json_int(s, "booksCount", 0));
-        SDL_Texture *cover = series_cover_texture(s);
-        if (cover) draw_cover_texture(cover, 22, y + 7, 42, 60);
-        else       draw_cover_placeholder(22, y + 7, 42, 60, row);
-        text_draw(gRen, row, 78, y + 12, idx == catSel ? COL_SEL : COL_TEXT, 0);
-        text_draw(gRen, meta, 78, y + 42, COL_SOFT, 0);
+    if (catCount == 0) {
+        draw_empty_state("Nada encontrado", "Tente outra busca ou troque a area.");
+    } else {
+        int cols = grid_cols(), gap = grid_gap();
+        int cardW = grid_card_w(), coverH = grid_cover_h(), cellH = grid_cell_h();
+        int visR = grid_visible_rows();
+        for (int r = 0; r < visR; r++) {
+            for (int c = 0; c < cols; c++) {
+                int idx = (catScroll + r) * cols + c;
+                if (idx >= catCount) continue;
+                int x = gap + c * (cardW + gap);
+                int y = LIST_Y + 4 + r * cellH;
+                cJSON *s = cat_series_at(idx);
+                const char *title = json_str(s, "title", "(sem titulo)");
+                if (idx == catSel) {
+                    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 255);
+                    SDL_Rect b1 = { x - 3, y - 3, cardW + 6, coverH + 6 };
+                    SDL_RenderDrawRect(gRen, &b1);
+                    SDL_Rect b2 = { x - 2, y - 2, cardW + 4, coverH + 4 };
+                    SDL_RenderDrawRect(gRen, &b2);
+                }
+                SDL_Texture *cover = series_cover_texture(s);
+                if (cover) draw_cover_texture(cover, x, y, cardW, coverH);
+                else       draw_cover_placeholder(x, y, cardW, coverH, title);
+                char t[40];
+                snprintf(t, sizeof(t), "%.16s", title);
+                text_draw(gRen, t, x, y + coverH + 5, idx == catSel ? COL_SEL : COL_SOFT, 0);
+            }
+        }
     }
-    draw_scrollbar(catScroll, catCount, vis);
     draw_footer(NULL);
     btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search()); btn_draw(btn_next());
 }
@@ -886,6 +1122,8 @@ static void render_chapters(void) {
 
 static void render_continue(void) {
     draw_background();
+    g_cover_started_this_frame = 0;
+    cover_cache_pump();
     draw_topbar("Continuar lendo", btn_library());
     int vis = visible_rows();
     if (contN == 0) {
@@ -896,15 +1134,20 @@ static void render_continue(void) {
         if (idx >= contN) break;
         int y = LIST_Y + i * ROW_H;
         draw_row_shell(y, idx == contSel);
-        char st[256] = {0}, cl[64] = {0}, sid[96] = {0}, pb[512] = {0};
+        char st[256] = {0}, cl[64] = {0}, sid[96] = {0}, pb[512] = {0}, cv[640] = {0};
         int page = 1, pages = 1;
-        store_entry(contIds[idx], sid, sizeof(sid), st, sizeof(st), cl, sizeof(cl), pb, sizeof(pb), &page, &pages);
+        store_entry(contIds[idx], sid, sizeof(sid), st, sizeof(st), cl, sizeof(cl), pb, sizeof(pb), cv, sizeof(cv), &page, &pages);
         char row[360];
         char meta[160];
+        int pct = pages > 0 ? (page * 100) / pages : 0;
+        if (pct > 100) pct = 100;
         snprintf(row, sizeof(row), "%.34s", st[0] ? st : "(serie)");
-        snprintf(meta, sizeof(meta), "%s  pagina %d/%d", cl, page, pages);
-        text_draw(gRen, row, 24, y + 8, idx == contSel ? COL_SEL : COL_TEXT, 0);
-        text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
+        snprintf(meta, sizeof(meta), "%s  pagina %d/%d  %d%%", cl, page, pages, pct);
+        SDL_Texture *cover = cover_texture_for_key(contIds[idx], cv);
+        if (cover) draw_cover_texture(cover, 22, y + 7, 42, 60);
+        else       draw_cover_placeholder(22, y + 7, 42, 60, st[0] ? st : "?");
+        text_draw(gRen, row, 78, y + 9, idx == contSel ? COL_SEL : COL_TEXT, 0);
+        text_draw(gRen, meta, 78, y + 38, COL_SOFT, 0);
     }
     draw_scrollbar(contScroll, contN, vis);
     draw_footer("A/toque: continuar    B/Biblioteca: acervo    ZL/ZR: girar");
@@ -914,49 +1157,62 @@ static void render_reader(void) {
     SDL_SetRenderDrawColor(gRen, 0, 0, 0, 255);
     SDL_RenderClear(gRen);
     if (pageTex) {
-        int tw = 0, th = 0;
-        SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
-        if (tw > 0 && th > 0) {
-            float scale = (float)LW() / tw;
-            float sh = (float)LH() / th;
-            if (sh < scale) scale = sh;
-            int w = (int)(tw * scale), h = (int)(th * scale);
-            SDL_Rect dst = { (LW() - w) / 2, (LH() - h) / 2, w, h };
-            SDL_RenderCopy(gRen, pageTex, NULL, &dst);
-        }
+        SDL_Rect dst;
+        reader_page_rect(&dst);
+        SDL_RenderCopy(gRen, pageTex, NULL, &dst);
     } else {
         SDL_SetRenderDrawColor(gRen, 90, 0, 120, 255);
         SDL_Rect r = { LW()/2 - 160, LH()/2 - 40, 320, 80 };
         SDL_RenderFillRect(gRen, &r);
     }
-    // barra de topo translucida
-    SDL_SetRenderDrawColor(gRen, 0, 0, 0, 170);
-    SDL_Rect bar = { 0, 0, LW(), TB };
-    SDL_RenderFillRect(gRen, &bar);
-    btn_draw(btn_back());
-    btn_draw(btn_rotate());
-    draw_version_badge();
-    char pc[80];
-    snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
-    text_draw(gRen, pc, btn_back().x + btn_back().w + 16, 12, COL_SEL, 0);
+    int overlay = SDL_GetTicks() < reader_overlay_until;
+    if (overlay) {
+        SDL_SetRenderDrawColor(gRen, 0, 0, 0, 175);
+        SDL_Rect bar = { 0, 0, LW(), TB };
+        SDL_RenderFillRect(gRen, &bar);
+        btn_draw(btn_back());
+        btn_draw(btn_rotate());
+        char pc[160];
+        snprintf(pc, sizeof(pc), "%.34s  %s  Pagina %d/%d", curSeriesTitle, curChapLabel, curPage, pageCount);
+        text_draw(gRen, pc, btn_back().x + btn_back().w + 14, 12, COL_SEL, 0);
+        text_draw(gRen, rd_zoom > 1.02f ? "Arraste para mover . pinca para zoom . toque para ocultar"
+                                        : "Arraste horizontal vira pagina . pinca para zoom . toque mostra/oculta",
+                  18, LH() - 46, COL_DIM, 0);
+    }
+    if (next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) {
+        Uint32 elapsed = SDL_GetTicks() - next_prompt_started;
+        int left = (int)((NEXT_CHAPTER_MS - (elapsed < NEXT_CHAPTER_MS ? elapsed : NEXT_CHAPTER_MS) + 999) / 1000);
+        SDL_SetRenderDrawColor(gRen, 0, 0, 0, 205);
+        SDL_Rect box = { LW()/2 - 280, LH()/2 - 72, 560, 172 };
+        SDL_RenderFillRect(gRen, &box);
+        SDL_SetRenderDrawColor(gRen, 250, 215, 120, 230);
+        SDL_RenderDrawRect(gRen, &box);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Proximo capitulo em %ds", left);
+        text_draw(gRen, msg, box.x + 32, box.y + 24, COL_HEAD, 1);
+        cJSON *next = chap_at(curChapIndex + 1);
+        snprintf(msg, sizeof(msg), "Capitulo #%s", json_str(next, "number", "?"));
+        text_draw(gRen, msg, box.x + 32, box.y + 62, COL_SEL, 0);
+        btn_draw(btn_next_open());
+        btn_draw(btn_next_cancel());
+    }
     if (pageCount > 1) {
         int barW = LW() - 36;
         int filled = (barW * curPage) / pageCount;
         SDL_SetRenderDrawColor(gRen, 26, 30, 44, 210);
-        SDL_Rect bg = { 18, LH() - 22, barW, 7 };
+        SDL_Rect bg = { 18, LH() - 14, barW, 6 };
         SDL_RenderFillRect(gRen, &bg);
         SDL_SetRenderDrawColor(gRen, 250, 215, 120, 240);
-        SDL_Rect fg = { 18, LH() - 22, filled, 7 };
+        SDL_Rect fg = { 18, LH() - 14, filled, 6 };
         SDL_RenderFillRect(gRen, &fg);
     }
-    text_draw(gRen, "Toque esquerda/direita para virar", 18, LH() - 52, COL_DIM, 0);
 }
 
 // ---------------- toque: dispatch de tap ----------------
 static int *running_ptr = NULL;
 static void handle_tap(int lx, int ly) {
     // botoes comuns no topo
-    if (btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); return; }
+    if (screen != SC_READER && btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); return; }
 
     if (screen == SC_SERIES) {
         if (btn_hit(btn_exit(), lx, ly)) { if (running_ptr) *running_ptr = 0; return; }
@@ -970,9 +1226,16 @@ static void handle_tap(int lx, int ly) {
             if (rs != -1) { snprintf(g_search, sizeof(g_search), "%s", rs == 0 ? term : ""); catPage = 0; catSel = 0; load_catalog(); }
             return;
         }
-        if (ly >= LIST_Y && ly < LIST_Y + visible_rows() * ROW_H) {
-            int idx = catScroll + (ly - LIST_Y) / ROW_H;
-            if (idx >= 0 && idx < catCount) { catSel = idx; enter_series(idx); }
+        {
+            int cols = grid_cols(), gap = grid_gap(), cardW = grid_card_w(), cellH = grid_cell_h();
+            if (ly >= LIST_Y && ly < LH() - FOOTER_H) {
+                int r = (ly - LIST_Y - 4) / cellH;
+                int c = (lx - gap) / (cardW + gap);
+                if (r >= 0 && c >= 0 && c < cols) {
+                    int idx = (catScroll + r) * cols + c;
+                    if (idx >= 0 && idx < catCount) { catSel = idx; enter_series(idx); }
+                }
+            }
         }
     } else if (screen == SC_CHAPTERS) {
         if (btn_hit(btn_back(), lx, ly)) { screen = SC_SERIES; return; }
@@ -989,20 +1252,149 @@ static void handle_tap(int lx, int ly) {
             if (idx >= 0 && idx < contN) { contSel = idx; enter_reader_from_record(contIds[idx]); }
         }
     } else { // SC_READER
-        if (ly < TB) {
+        if (next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) {
+            if (btn_hit(btn_next_open(), lx, ly)) { reader_open_next_chapter_now(); return; }
+            if (btn_hit(btn_next_cancel(), lx, ly)) { next_prompt_cancelled = 1; next_prompt_started = 0; reader_show_overlay(); return; }
+        }
+        int overlay = SDL_GetTicks() < reader_overlay_until;
+        if (overlay && ly < TB) {
             if (btn_hit(btn_back(), lx, ly)) { if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; } screen = g_reader_back; return; }
+            if (btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); reader_clamp_pan(); reader_show_overlay(); return; }
             return;
         }
-        if (lx < LW() / 2) reader_goto(curPage - 1);
-        else               reader_goto(curPage + 1);
+        reader_show_overlay();
+    }
+}
+
+static int reader_touch_count(void) {
+    int n = 0;
+    for (int i = 0; i < 2; i++) if (readerTouches[i].active) n++;
+    return n;
+}
+
+static int reader_touch_find(SDL_FingerID id) {
+    for (int i = 0; i < 2; i++) if (readerTouches[i].active && readerTouches[i].id == id) return i;
+    return -1;
+}
+
+static int reader_touch_free_slot(void) {
+    for (int i = 0; i < 2; i++) if (!readerTouches[i].active) return i;
+    return -1;
+}
+
+static float reader_touch_dist(void) {
+    float dx = (float)(readerTouches[0].x - readerTouches[1].x);
+    float dy = (float)(readerTouches[0].y - readerTouches[1].y);
+    return SDL_sqrtf(dx * dx + dy * dy);
+}
+
+static void reader_touch_begin(SDL_FingerID id, float nx, float ny) {
+    int lx, ly;
+    screen_to_logical(nx, ny, &lx, &ly);
+    int slot = reader_touch_free_slot();
+    if (slot < 0) {
+        reader_reset_touch();
+        slot = 0;
+    }
+    readerTouches[slot].active = 1;
+    readerTouches[slot].id = id;
+    readerTouches[slot].x = readerTouches[slot].startX = lx;
+    readerTouches[slot].y = readerTouches[slot].startY = ly;
+    readerSwipeMoved = 0;
+    if (reader_touch_count() == 2) {
+        readerPinching = 1;
+        readerPinchLive = 0;
+        readerPinchBaseDist = reader_touch_dist();
+        readerPinchBaseZoom = rd_zoom;
+    }
+}
+
+static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
+    int slot = reader_touch_find(id);
+    if (slot < 0) return;
+    int lx, ly;
+    screen_to_logical(nx, ny, &lx, &ly);
+    int dx = lx - readerTouches[slot].x;
+    int dy = ly - readerTouches[slot].y;
+    readerTouches[slot].x = lx;
+    readerTouches[slot].y = ly;
+    int totalMove = abs(lx - readerTouches[slot].startX) + abs(ly - readerTouches[slot].startY);
+    if (totalMove > readerSwipeMoved) readerSwipeMoved = totalMove;
+
+    if (reader_touch_count() == 2 && readerPinching) {
+        float dist = reader_touch_dist();
+        if (readerPinchBaseDist < 8.0f) readerPinchBaseDist = dist;
+        float ratio = readerPinchBaseDist > 0.0f ? dist / readerPinchBaseDist : 1.0f;
+        if (readerPinchLive || ratio < 1.0f - READER_PINCH_DEADZONE || ratio > 1.0f + READER_PINCH_DEADZONE) {
+            readerPinchLive = 1;
+            rd_zoom = readerPinchBaseZoom * ratio;
+            if (rd_zoom < READER_ZOOM_MIN) rd_zoom = READER_ZOOM_MIN;
+            if (rd_zoom > READER_ZOOM_MAX) rd_zoom = READER_ZOOM_MAX;
+            reader_clamp_pan();
+            reader_show_overlay();
+        }
+        return;
+    }
+
+    if (reader_touch_count() == 1 && rd_zoom > READER_ZOOM_MIN + 0.01f) {
+        rd_pan_x += dx;
+        rd_pan_y += dy;
+        reader_clamp_pan();
+    }
+}
+
+static void reader_touch_end(SDL_FingerID id, float nx, float ny) {
+    int slot = reader_touch_find(id);
+    if (slot < 0) return;
+    int lx, ly;
+    screen_to_logical(nx, ny, &lx, &ly);
+    int dx = lx - readerTouches[slot].startX;
+    int dy = ly - readerTouches[slot].startY;
+    int wasPinching = readerPinching || readerPinchLive || reader_touch_count() > 1;
+    readerTouches[slot].active = 0;
+
+    if (reader_touch_count() == 0) {
+        if (!wasPinching) {
+            int adx = abs(dx), ady = abs(dy);
+            if (rd_zoom <= READER_ZOOM_MIN + 0.01f && adx > 70 && adx > ady + 30) {
+                reader_advance(dx < 0 ? 1 : -1);
+            } else if (readerSwipeMoved <= TAP_THRESH) {
+                handle_tap(lx, ly);
+            }
+        }
+        reader_reset_touch();
+    } else {
+        for (int i = 0; i < 2; i++) {
+            if (readerTouches[i].active) {
+                readerTouches[i].startX = readerTouches[i].x;
+                readerTouches[i].startY = readerTouches[i].y;
+            }
+        }
+        readerPinching = 0;
+        readerPinchLive = 0;
+        readerSwipeMoved = 0;
     }
 }
 
 // arrasto vertical nas listas -> rola
 static void handle_drag(int curLY) {
+    if (screen == SC_READER) {
+        return;
+    }
+    if (screen == SC_SERIES) {   // grade: rola por linhas de cards
+        int cellH = grid_cell_h();
+        int cols = grid_cols();
+        int maxRow = (catCount + cols - 1) / cols - grid_visible_rows();
+        if (maxRow < 0) maxRow = 0;
+        dragAccum += (float)(curLY - lastLY);
+        while (dragAccum >= cellH) { catScroll--; dragAccum -= cellH; }
+        while (dragAccum <= -cellH) { catScroll++; dragAccum += cellH; }
+        if (catScroll < 0) catScroll = 0;
+        if (catScroll > maxRow) catScroll = maxRow;
+        return;
+    }
     int *scroll = NULL, count = 0;
-    if (screen == SC_SERIES)         { scroll = &catScroll;  count = catCount; }
-    else if (screen == SC_CONTINUE)  { scroll = &contScroll; count = contN; }
+    if (screen == SC_CONTINUE)  { scroll = &contScroll; count = contN; }
     else if (screen == SC_CHAPTERS)  { scroll = &chapScroll; count = chapCount; }
     else return;
     dragAccum += (float)(curLY - lastLY);
@@ -1056,10 +1448,16 @@ int main(int argc, char **argv) {
                     if (e.type == SDL_QUIT) { running = 0; break; }
 
                     if (e.type == SDL_FINGERDOWN) {
-                        screen_to_logical(e.tfinger.x, e.tfinger.y, &downLX, &downLY);
-                        lastLY = downLY; movedMax = 0; dragAccum = 0; fingerDown = 1;
+                        if (screen == SC_READER) {
+                            reader_touch_begin(e.tfinger.fingerId, e.tfinger.x, e.tfinger.y);
+                        } else {
+                            screen_to_logical(e.tfinger.x, e.tfinger.y, &downLX, &downLY);
+                            lastLY = downLY; movedMax = 0; dragAccum = 0; fingerDown = 1;
+                        }
                     } else if (e.type == SDL_FINGERMOTION) {
-                        if (fingerDown) {
+                        if (screen == SC_READER) {
+                            reader_touch_move(e.tfinger.fingerId, e.tfinger.x, e.tfinger.y);
+                        } else if (fingerDown) {
                             int cx, cy; screen_to_logical(e.tfinger.x, e.tfinger.y, &cx, &cy);
                             int d = abs(cx - downLX) + abs(cy - downLY);
                             if (d > movedMax) movedMax = d;
@@ -1067,18 +1465,25 @@ int main(int argc, char **argv) {
                             lastLY = cy;
                         }
                     } else if (e.type == SDL_FINGERUP) {
-                        if (fingerDown && movedMax <= TAP_THRESH) handle_tap(downLX, downLY);
-                        fingerDown = 0;
+                        if (screen == SC_READER) {
+                            reader_touch_end(e.tfinger.fingerId, e.tfinger.x, e.tfinger.y);
+                        } else {
+                            if (fingerDown && movedMax <= TAP_THRESH) handle_tap(downLX, downLY);
+                            fingerDown = 0;
+                        }
                     } else if (e.type == SDL_JOYBUTTONDOWN) {
                         int b = e.jbutton.button;
                         if (b == JOY_PLUS) { running = 0; break; }
                         if (b == JOY_ZL || b == JOY_ZR) { toggle_orientation(); continue; }
 
                         if (screen == SC_SERIES) {
-                            if (b == JOY_UP && catSel > 0) catSel--;
-                            else if (b == JOY_DOWN && catSel < catCount - 1) catSel++;
-                            else if ((b == JOY_L || b == JOY_DLEFT) && catPage > 0) { catPage--; catSel = 0; load_catalog(); }
-                            else if ((b == JOY_R || b == JOY_DRIGHT) && catPage < catTotal - 1) { catPage++; catSel = 0; load_catalog(); }
+                            int gc = grid_cols();
+                            if (b == JOY_UP) { if (catSel - gc >= 0) catSel -= gc; }
+                            else if (b == JOY_DOWN) { if (catSel + gc < catCount) catSel += gc; }
+                            else if (b == JOY_DLEFT) { if (catSel > 0) catSel--; }
+                            else if (b == JOY_DRIGHT) { if (catSel < catCount - 1) catSel++; }
+                            else if (b == JOY_L) { if (catPage > 0) { catPage--; catSel = 0; load_catalog(); } }
+                            else if (b == JOY_R) { if (catPage < catTotal - 1) { catPage++; catSel = 0; load_catalog(); } }
                             else if (b == JOY_Y) { areaIdx = (areaIdx + 1) % 3; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); }
                             else if (b == JOY_X) {
                                 char term[96] = {0};
@@ -1088,8 +1493,12 @@ int main(int argc, char **argv) {
                             else if (b == JOY_MINUS) { store_clear_token(); if (g_token) { free(g_token); g_token = NULL; } if (!authenticate()) { running = 0; break; } catPage = 0; catSel = 0; load_catalog(); }
                             else if (b == JOY_B) { load_continue(); screen = SC_CONTINUE; }
                             else if (b == JOY_A && catCount > 0) enter_series(catSel);
-                            if (catSel < catScroll) catScroll = catSel;
-                            if (catSel >= catScroll + visible_rows()) catScroll = catSel - visible_rows() + 1;
+                            {
+                                int selRow = gc > 0 ? catSel / gc : 0;
+                                int visR = grid_visible_rows();
+                                if (selRow < catScroll) catScroll = selRow;
+                                if (selRow >= catScroll + visR) catScroll = selRow - visR + 1;
+                            }
                         } else if (screen == SC_CHAPTERS) {
                             if (b == JOY_UP && chapSel > 0) chapSel--;
                             else if (b == JOY_DOWN && chapSel < chapCount - 1) chapSel++;
@@ -1107,13 +1516,16 @@ int main(int argc, char **argv) {
                             if (contSel < contScroll) contScroll = contSel;
                             if (contSel >= contScroll + visible_rows()) contScroll = contSel - visible_rows() + 1;
                         } else {
-                            if (b == JOY_R || b == JOY_DRIGHT) reader_goto(curPage + 1);
-                            else if (b == JOY_L || b == JOY_DLEFT) reader_goto(curPage - 1);
+                            if (b == JOY_A && next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) reader_open_next_chapter_now();
+                            else if (b == JOY_X && next_prompt_started) { next_prompt_cancelled = 1; next_prompt_started = 0; reader_show_overlay(); }
+                            else if (b == JOY_R || b == JOY_DRIGHT || b == JOY_DOWN || b == JOY_A) reader_advance(1);
+                            else if (b == JOY_L || b == JOY_DLEFT || b == JOY_UP) reader_advance(-1);
                             else if (b == JOY_B) { if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; } screen = g_reader_back; }
                         }
                     }
                 }
 
+                reader_tick();
                 begin_frame();
                 if (screen == SC_SERIES) render_series();
                 else if (screen == SC_CONTINUE) render_continue();

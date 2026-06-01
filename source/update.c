@@ -265,9 +265,8 @@ int update_apply(const struct update_info *info, const char *target_path, char *
         return -1;
     }
 
+    // Grava apenas no caminho do .nro que esta rodando (evita espalhar copias soltas).
     add_install_path(paths, &path_count, target_path);
-    add_install_path(paths, &path_count, "sdmc:/switch/Meruem.nro");
-    add_install_path(paths, &path_count, "sdmc:/switch/Meruem/Meruem.nro");
 
     for (i = 0; i < path_count; i++) {
         char one_err[256] = {0};

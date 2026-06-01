@@ -1,5 +1,5 @@
 // store.c - token + historico de leitura no SD (sdmc:/switch/Meruem).
-// progress.json: { "<bookId>": { p, sid, st, cl, pb, pg, ts }, ... }
+// progress.json: { "<bookId>": { p, sid, st, cl, pb, cv, pg, ts }, ... }
 #include "store.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +12,8 @@
 #define DIR_APP  "sdmc:/switch/Meruem"
 #define TOKEN_F  DIR_APP "/token.txt"
 #define SERVER_F DIR_APP "/server.txt"
+#define USER_F   DIR_APP "/user.txt"
+#define SEEN_F   DIR_APP "/update_seen.txt"
 #define PROG_F   DIR_APP "/progress.json"
 
 static cJSON *g_prog = NULL;
@@ -86,6 +88,60 @@ void store_save_server(const char *url) {
     fclose(f);
 }
 
+int store_load_user(char *out, size_t cap) {
+    FILE *f;
+    size_t n;
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    f = fopen(USER_F, "rb");
+    if (!f) return 0;
+    n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    trim_line(out);
+    return out[0] ? 1 : 0;
+}
+
+void store_save_user(const char *user) {
+    FILE *f;
+    char clean[128];
+    if (!user || !user[0]) return;
+    snprintf(clean, sizeof(clean), "%s", user);
+    trim_line(clean);
+    f = fopen(USER_F, "wb");
+    if (!f) return;
+    fwrite(clean, 1, strlen(clean), f);
+    fclose(f);
+}
+
+void store_clear_user(void) { remove(USER_F); }
+
+int store_load_update_seen(char *out, size_t cap) {
+    FILE *f;
+    size_t n;
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    f = fopen(SEEN_F, "rb");
+    if (!f) return 0;
+    n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    trim_line(out);
+    return out[0] ? 1 : 0;
+}
+
+void store_save_update_seen(const char *tag) {
+    FILE *f;
+    char clean[64];
+    if (!tag || !tag[0]) return;
+    snprintf(clean, sizeof(clean), "%s", tag);
+    trim_line(clean);
+    f = fopen(SEEN_F, "wb");
+    if (!f) return;
+    fwrite(clean, 1, strlen(clean), f);
+    fclose(f);
+}
+
 void store_flush(void) {
     if (!g_prog) return;
     char *s = cJSON_PrintUnformatted(g_prog);
@@ -117,7 +173,7 @@ static void jset_str(cJSON *o, const char *k, const char *v) {
 
 void store_record(const char *bookId, int page, const char *seriesId,
                   const char *seriesTitle, const char *chapLabel,
-                  const char *pageBase, int pages) {
+                  const char *pageBase, const char *seriesCover, int pages) {
     if (!g_prog || !bookId || !bookId[0]) return;
     cJSON *it = cJSON_GetObjectItemCaseSensitive(g_prog, bookId);
     if (!it || !cJSON_IsObject(it)) {
@@ -130,6 +186,7 @@ void store_record(const char *bookId, int page, const char *seriesId,
     jset_str(it, "st", seriesTitle);
     jset_str(it, "cl", chapLabel);
     jset_str(it, "pb", pageBase);
+    jset_str(it, "cv", seriesCover);
     jset_num(it, "pg", pages);
     jset_num(it, "ts", (double)time(NULL));
     store_flush();
@@ -171,11 +228,13 @@ int store_entry(const char *bookId,
                 char *seriesTitle, size_t stCap,
                 char *chapLabel, size_t clCap,
                 char *pageBase, size_t pbCap,
+                char *seriesCover, size_t cvCap,
                 int *page, int *pages) {
     if (seriesId && sidCap) seriesId[0] = '\0';
     if (seriesTitle && stCap) seriesTitle[0] = '\0';
     if (chapLabel && clCap) chapLabel[0] = '\0';
     if (pageBase && pbCap) pageBase[0] = '\0';
+    if (seriesCover && cvCap) seriesCover[0] = '\0';
     if (page) *page = 1;
     if (pages) *pages = 1;
     if (!g_prog || !bookId) return 0;
@@ -186,6 +245,7 @@ int store_entry(const char *bookId,
     x = cJSON_GetObjectItemCaseSensitive(it, "st");  if (seriesTitle && cJSON_IsString(x)) snprintf(seriesTitle, stCap, "%s", x->valuestring);
     x = cJSON_GetObjectItemCaseSensitive(it, "cl");  if (chapLabel && cJSON_IsString(x))   snprintf(chapLabel, clCap, "%s", x->valuestring);
     x = cJSON_GetObjectItemCaseSensitive(it, "pb");  if (pageBase && cJSON_IsString(x))    snprintf(pageBase, pbCap, "%s", x->valuestring);
+    x = cJSON_GetObjectItemCaseSensitive(it, "cv");  if (seriesCover && cJSON_IsString(x)) snprintf(seriesCover, cvCap, "%s", x->valuestring);
     x = cJSON_GetObjectItemCaseSensitive(it, "p");   if (page && cJSON_IsNumber(x))        *page = x->valueint;
     x = cJSON_GetObjectItemCaseSensitive(it, "pg");  if (pages && cJSON_IsNumber(x))       *pages = x->valueint;
     return 1;

@@ -11,13 +11,20 @@ void store_clear_token(void);
 int  store_load_server(char *out, size_t cap);
 void store_save_server(const char *url);
 
+int  store_load_user(char *out, size_t cap);
+void store_save_user(const char *user);
+void store_clear_user(void);
+
+int  store_load_update_seen(char *out, size_t cap);
+void store_save_update_seen(const char *tag);
+
 // pagina salva de um capitulo (>=1) ou 1 se nao houver.
 int  store_get_progress(const char *bookId);
 
 // registra/atualiza a leitura (pagina atual + metadados p/ "continuar lendo").
 void store_record(const char *bookId, int page, const char *seriesId,
                   const char *seriesTitle, const char *chapLabel,
-                  const char *pageBase, int pages);
+                  const char *pageBase, const char *seriesCover, int pages);
 
 // preenche ids[] com ate `max` capitulos lidos recentemente (mais recente 1o).
 // Retorna a quantidade.
@@ -29,6 +36,7 @@ int  store_entry(const char *bookId,
                  char *seriesTitle, size_t stCap,
                  char *chapLabel, size_t clCap,
                  char *pageBase, size_t pbCap,
+                 char *seriesCover, size_t cvCap,
                  int *page, int *pages);
 
 void store_flush(void);
