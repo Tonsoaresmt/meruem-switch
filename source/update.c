@@ -175,7 +175,7 @@ int update_check(struct update_info *info) {
 
     snprintf(url, sizeof(url), "https://api.github.com/repos/%s/%s/releases/latest",
              UPDATE_REPO_OWNER, UPDATE_REPO_NAME);
-    http_code = net_request(url, "GET", NULL, NULL, &resp, &net_err);
+    http_code = net_request_timeout(url, "GET", NULL, NULL, &resp, &net_err, 5L, 10L);
     if (info) info->http_code = http_code;
     if (http_code != 200 || !resp.data) {
         if (info) {

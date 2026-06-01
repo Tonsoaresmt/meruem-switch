@@ -42,6 +42,7 @@
 #define NEXT_CHAPTER_MS 5000
 #define AREA_COUNT 2
 #define OFFLINE_DIR "sdmc:/switch/Meruem/offline"
+#define OFFLINE_COUNT_CACHE_MAX 128
 
 #define JOY_A      0
 #define JOY_B      1
@@ -129,6 +130,14 @@ typedef struct {
 
 static CoverCacheEntry g_cover_cache[COVER_CACHE_MAX];
 static int g_cover_started_this_frame = 0;
+
+typedef struct {
+    char id[96];
+    int pages;
+    int count;
+} OfflineCountEntry;
+
+static OfflineCountEntry g_offline_counts[OFFLINE_COUNT_CACHE_MAX];
 
 // estado do toque
 static int  fingerDown = 0;
@@ -466,7 +475,7 @@ static int token_is_valid(const char *token) {
     struct membuf r = {0};
     char url[512];
     snprintf(url, sizeof(url), "%s/switch/ping", g_server);
-    long c = net_request(url, "GET", NULL, token, &r, NULL);
+    long c = net_request_timeout(url, "GET", NULL, token, &r, NULL, 4L, 8L);
     membuf_free(&r);
     return c == 200;
 }
@@ -513,7 +522,18 @@ static int offline_ensure_dirs(const char *bookId) {
     return 1;
 }
 
-static int offline_count_pages(const char *bookId, int pages) {
+static void offline_count_invalidate(const char *bookId) {
+    if (!bookId || !bookId[0]) return;
+    for (int i = 0; i < OFFLINE_COUNT_CACHE_MAX; i++) {
+        if (g_offline_counts[i].id[0] && strcmp(g_offline_counts[i].id, bookId) == 0) {
+            g_offline_counts[i].id[0] = '\0';
+            g_offline_counts[i].pages = 0;
+            g_offline_counts[i].count = 0;
+        }
+    }
+}
+
+static int offline_count_pages_scan(const char *bookId, int pages) {
     int n = 0;
     char path[320];
     if (!bookId || !bookId[0] || pages <= 0) return 0;
@@ -522,6 +542,23 @@ static int offline_count_pages(const char *bookId, int pages) {
         if (file_exists(path)) n++;
     }
     return n;
+}
+
+static int offline_count_pages(const char *bookId, int pages) {
+    int empty = -1;
+    if (!bookId || !bookId[0] || pages <= 0) return 0;
+    for (int i = 0; i < OFFLINE_COUNT_CACHE_MAX; i++) {
+        if (g_offline_counts[i].id[0] && strcmp(g_offline_counts[i].id, bookId) == 0 &&
+            g_offline_counts[i].pages == pages) {
+            return g_offline_counts[i].count;
+        }
+        if (empty < 0 && !g_offline_counts[i].id[0]) empty = i;
+    }
+    if (empty < 0) empty = 0;
+    snprintf(g_offline_counts[empty].id, sizeof(g_offline_counts[empty].id), "%s", bookId);
+    g_offline_counts[empty].pages = pages;
+    g_offline_counts[empty].count = offline_count_pages_scan(bookId, pages);
+    return g_offline_counts[empty].count;
 }
 
 static SDL_Texture *texture_from_rw(SDL_RWops *rw) {
@@ -549,7 +586,7 @@ static SDL_Texture *load_page(const char *baseUrl, int page) {
     char url[560];
     snprintf(url, sizeof(url), "%s%d", baseUrl, page);
     struct membuf buf = {0};
-    long code = net_request(url, "GET", NULL, g_token, &buf, NULL);
+    long code = net_request_timeout(url, "GET", NULL, g_token, &buf, NULL, 8L, 25L);
     SDL_Texture *tex = NULL;
     if (code == 200 && buf.data && buf.len > 0) {
         tex = texture_from_rw(SDL_RWFromConstMem(buf.data, (int)buf.len));
@@ -581,7 +618,7 @@ static void cover_cache_clear(void) {
 static int cover_download_thread(void *arg) {
     CoverCacheEntry *entry = (CoverCacheEntry *)arg;
     struct membuf buf = {0};
-    long code = net_request(entry->url, "GET", NULL, entry->token, &buf, NULL);
+    long code = net_request_timeout(entry->url, "GET", NULL, entry->token, &buf, NULL, 6L, 18L);
     if (code == 200 && buf.data && buf.len > 0) {
         entry->data = (unsigned char *)buf.data;
         entry->len = buf.len;
@@ -623,6 +660,7 @@ static void cover_cache_pump(void) {
 
 static SDL_Texture *cover_texture_for_key(const char *id, const char *cover) {
     int empty = -1;
+    if (g_offline_mode) return NULL;
     if (!id[0] || !cover[0]) return NULL;
     for (int i = 0; i < COVER_CACHE_MAX; i++) {
         if (g_cover_cache[i].id[0] && strcmp(g_cover_cache[i].id, id) == 0) {
@@ -806,7 +844,7 @@ static void offline_download_current_chapter(void) {
         if (offline_cancel_requested()) { cancelled = 1; break; }
         offline_progress_screen(p, pageCount, saved, failed);
         snprintf(url, sizeof(url), "%s%d", pageBase, p);
-        long code = net_download_file(url, g_token, path, NULL);
+        long code = net_download_file_timeout(url, g_token, path, NULL, 8L, 45L);
         if (code == 200) saved++;
         else {
             remove(path);
@@ -814,6 +852,7 @@ static void offline_download_current_chapter(void) {
         }
     }
 
+    offline_count_invalidate(curBookId);
     {
         SDL_Texture *newTex = load_page(pageBase, curPage);
         if (newTex) {
@@ -1098,10 +1137,15 @@ static void load_profile(void) {
     profileBooks[0] = '\0';
     profileCounts[0] = '\0';
 
+    if (g_offline_mode) {
+        profileFailed = 1;
+        return;
+    }
+
     char url[512];
     snprintf(url, sizeof(url), "%s/switch/me", g_server);
     struct membuf r = {0};
-    long code = net_request(url, "GET", NULL, g_token, &r, NULL);
+    long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 6L, 14L);
     if (code != 200 || !r.data) {
         profileFailed = 1;
         membuf_free(&r);

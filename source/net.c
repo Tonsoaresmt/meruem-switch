@@ -42,9 +42,10 @@ void net_exit(void) {
     curl_global_cleanup();
 }
 
-long net_request(const char *url, const char *method,
-                 const char *body, const char *bearer,
-                 struct membuf *out, const char **err) {
+long net_request_timeout(const char *url, const char *method,
+                         const char *body, const char *bearer,
+                         struct membuf *out, const char **err,
+                         long connect_timeout, long total_timeout) {
     if (err) *err = NULL;
 
     CURL *curl = curl_easy_init();
@@ -64,8 +65,8 @@ long net_request(const char *url, const char *method,
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connect_timeout);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, total_timeout);
     // TODO (seguranca): verificar com cacert.pem no romfs em vez de desligar.
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -92,8 +93,15 @@ long net_request(const char *url, const char *method,
     return code;
 }
 
-long net_download_file(const char *url, const char *bearer,
-                       const char *path, const char **err) {
+long net_request(const char *url, const char *method,
+                 const char *body, const char *bearer,
+                 struct membuf *out, const char **err) {
+    return net_request_timeout(url, method, body, bearer, out, err, 15L, 45L);
+}
+
+long net_download_file_timeout(const char *url, const char *bearer,
+                               const char *path, const char **err,
+                               long connect_timeout, long total_timeout) {
     CURL *curl;
     CURLcode res;
     struct curl_slist *headers = NULL;
@@ -129,8 +137,8 @@ long net_download_file(const char *url, const char *bearer,
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 180L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connect_timeout);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, total_timeout);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_cb);
@@ -150,6 +158,11 @@ long net_download_file(const char *url, const char *bearer,
 
     if (code != 200) remove(path);
     return code;
+}
+
+long net_download_file(const char *url, const char *bearer,
+                       const char *path, const char **err) {
+    return net_download_file_timeout(url, bearer, path, err, 15L, 180L);
 }
 
 void net_urlencode(const char *in, char *out, size_t cap) {
