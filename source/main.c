@@ -916,8 +916,8 @@ int main(int argc, char **argv) {
     } else {
         curl_ok = 1;
         store_init();
+        if (maybe_install_update()) goto cleanup;
         if (configure_server() && authenticate()) {
-            if (maybe_install_update()) goto cleanup;
             load_catalog();
             load_continue();
             screen = (contN > 0) ? SC_CONTINUE : SC_SERIES;

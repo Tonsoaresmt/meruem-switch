@@ -14,7 +14,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 APP_TITLE	:=	Meruem
 APP_AUTHOR	:=	Meruem
-APP_VERSION	:=	0.6.4
+APP_VERSION	:=	0.6.5
 UPDATE_REPO_OWNER	?=	Tonsoaresmt
 UPDATE_REPO_NAME	?=	meruem-switch
 
