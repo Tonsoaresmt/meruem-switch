@@ -3,9 +3,9 @@ param(
     [string]$RepoOwner,
 
     [string]$RepoName = "meruem-switch",
-    [string]$Tag = "v0.6.1",
-    [string]$Title = "v0.6.1",
-    [string]$Notes = "Primeira release publica do Meruem para Nintendo Switch."
+    [string]$Tag = "v0.10.0",
+    [string]$Title = "v0.10.0",
+    [string]$Notes = "Release publica do app Meruem para Nintendo Switch."
 )
 
 $ErrorActionPreference = "Stop"

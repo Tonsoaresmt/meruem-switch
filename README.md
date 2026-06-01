@@ -1,70 +1,118 @@
-# Meruem — Leitor de CBZ para Nintendo Switch
+# Meruem Switch
 
-Homebrew (`.nro`) que lê quadrinhos/mangás do servidor Meruem.
+Meruem Switch e o app homebrew do Meruem para Nintendo Switch. Ele permite ler
+mangas e HQs da plataforma Meruem diretamente no console, com login, favoritos,
+continuar lendo, zoom por toque e atualizacoes pelo proprio app.
 
-> ⚠️ **Local do projeto:** `C:\MeruemSwitch` (sem espaço no caminho). O `make` do devkitPro
-> quebra com espaços, por isso NÃO usamos `C:\...\Meruem Switch`.
+O objetivo e simples: levar a experiencia do Meruem para o Switch de forma
+pratica, leve e acessivel.
 
-## Servidor
-O app usa por padrão:
+> O app nao e distribuido pela Nintendo e nao esta na eShop. Ele e um homebrew
+> em formato `.nro` e precisa de um Switch preparado para abrir o Homebrew Menu.
+
+## Para Usuarios
+
+Baixe a versao mais recente em:
+
+[Releases do Meruem Switch](https://github.com/Tonsoaresmt/meruem-switch/releases/latest)
+
+Arquivo necessario:
+
 ```text
-https://meruem.tonserverlocal.uk
+Meruem.nro
 ```
 
-Para trocar o servidor sem recompilar, edite no SD:
-```text
-sdmc:/switch/Meruem/server.txt
-```
+Instalacao resumida:
 
-## Como compilar
-**Opção 1 (mais fácil):** clique com o botão direito em `build.ps1` → *Executar com o PowerShell*.
+1. Baixe `Meruem.nro`.
+2. Copie para o SD em `sdmc:/switch/Meruem/Meruem.nro`.
+3. Abra o Homebrew Menu no Switch.
+4. Inicie o Meruem.
+5. Entre com sua conta Meruem.
 
-**Opção 2:** abra o shell **"devkitPro MSYS2"** (Menu Iniciar) e rode:
-```bash
-cd /c/MeruemSwitch
-make -j4
-```
-Gera `Meruem.nro`. Para limpar: `make clean` (ou `build.ps1 clean`).
+Guia completo: [docs/INSTALL.md](docs/INSTALL.md)
 
-## Instalar no Switch
-Copie `Meruem.nro` para o SD em `sdmc:/switch/` (ou `sdmc:/switch/Meruem/`).
-No console (Atmosphère/CFW), abra o **Homebrew Menu** e selecione *Meruem*.
+## Acesso e Assinatura
 
-## Roadmap (fases)
-1. ✅ **Toolchain** — devkitPro (devkitA64 + libnx + SDL2/curl/zlib/png/jpeg) instalado.
-2. ✅ **Hello World** — `.nro` com console de texto. Build validado.
-3. ⏳ **API /switch** — rota dedicada com auth por token.
-4. ⏳ **Rede** — baixar catálogo JSON via libcurl, listar séries.
-5. ⏳ **Leitura** — exibir páginas com SDL2 + decodificação de imagem.
-6. ⏳ **CBZ offline** — baixar `.cbz`, abrir com miniz, cache + progresso.
-7. ⏳ **UI + auto-update** — polir interface e atualização via GitHub Releases.
+O Meruem Switch usa a conta da plataforma Meruem. Usuarios gratuitos podem ter
+limites diarios de leitura. Para leitura sem limite, e necessario ter uma
+assinatura ativa do Meruem.
 
-## Auto-update
-O app agora pode consultar a release mais recente do GitHub e baixar o novo `.nro`
-direto para o mesmo caminho do executável atual.
+O plano de entrada parte de **R$ 6,90 por 3 meses** para liberar leitura sem
+limite na area escolhida, conforme os planos disponiveis na plataforma.
 
-Antes de compilar a versão final da release, configure no `Makefile`:
-```make
-UPDATE_REPO_OWNER ?= seu-usuario
-UPDATE_REPO_NAME  ?= meruem-switch
-```
+Esse valor e mantido baixo de proposito: a ideia e deixar o projeto acessivel
+para mais leitores e, ao mesmo tempo, ajudar a manter a plataforma, o
+armazenamento, o trafego, as melhorias e a manutencao continua do Meruem online.
 
-Quando encontrar uma tag mais nova que `APP_VERSION`, o Meruem mostra um prompt no boot
-para baixar e trocar o `.nro` automaticamente.
+Os valores e areas liberadas podem mudar conforme os planos ativos no site. Em
+caso de duvida, consulte a tela de planos dentro do Meruem.
 
-Para publicar a primeira release depois do `gh auth login`, use:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\publish-release.ps1 -RepoOwner seu-usuario
-```
+## Recursos
 
-## Estrutura
-```
-C:\MeruemSwitch\
-  Makefile          # baseado no template application do devkitPro
-  build.ps1         # atalho de compilação (seta env + make)
-  icon.jpg          # ícone do app (NACP) — placeholder, trocar depois
-  source/
-    main.c          # código principal
-  include/          # (futuro) stb_image.h, miniz.h, cabeçalhos extras
-  Meruem.nro        # binário gerado (não versionado)
-```
+- Catalogo de mangas e HQs.
+- Login com conta Meruem.
+- Favoritos e prateleira sincronizados.
+- Continuar lendo.
+- Modo capas e modo lista.
+- Ordem de capitulos: mais antigos ou mais novos primeiro.
+- Leitura por controle ou touch.
+- Toque lateral para avancar/voltar pagina.
+- Zoom por pinca.
+- Arraste para mover imagem com zoom.
+- Proximo capitulo automatico.
+- Atualizacao do `.nro` pelo proprio app.
+
+## Formatos Suportados
+
+O Meruem Switch foi feito para conteudo entregue como paginas de imagem.
+
+Suportado:
+
+- CBZ;
+- CBR, quando disponivel como paginas de imagem;
+- mangas e HQs compativeis com leitura por paginas.
+
+Nao suportado no app do Switch por enquanto:
+
+- PDF;
+- EPUB;
+- livros de texto.
+
+PDF e EPUB sao filtrados para evitar tela roxa, erro de leitura ou obras que o
+Switch nao consegue abrir corretamente.
+
+## Controles Principais
+
+Catalogo:
+
+- `A`: abrir obra/capitulo;
+- `X`: alternar entre capas e lista;
+- `Y`: trocar area;
+- `L/R`: pagina anterior/proxima;
+- `B`: voltar ou ir para continuar lendo.
+
+Leitor:
+
+- `A` ou toque na direita: proxima pagina;
+- toque na esquerda: pagina anterior;
+- `L/R`: trocar pagina;
+- pinca com dois dedos: zoom;
+- arrastar com um dedo: mover imagem quando esta com zoom;
+- `B`: voltar;
+- `ZL/ZR`: girar tela.
+
+## Atualizacoes
+
+Quando uma nova versao e publicada no GitHub Releases, o app pode avisar no boot
+e baixar o novo `Meruem.nro` automaticamente.
+
+Se preferir atualizar manualmente, baixe a release mais recente e substitua o
+arquivo no SD.
+
+Mais detalhes: [docs/UPDATES.md](docs/UPDATES.md)
+
+## Aviso
+
+Este projeto e independente e nao possui afiliacao com Nintendo, Komga ou outros
+servicos de terceiros. Use apenas com conteudo que voce tem direito de acessar.
