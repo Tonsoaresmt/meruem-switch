@@ -24,6 +24,7 @@
 #define WIN_W 1280
 #define WIN_H 720
 #define ROT_ANGLE 90.0     // <-- calibrar: 90.0 ou 270.0
+#define DEFAULT_SERVER "https://meruem.tonserverlocal.uk"
 
 #define TB        50       // altura da barra de topo
 #define LIST_Y    60
@@ -350,6 +351,11 @@ static int maybe_install_update(void) {
 static int configure_server(void) {
     char url[256] = {0};
     if (store_load_server(g_server, sizeof(g_server))) return 1;
+    if (DEFAULT_SERVER[0]) {
+        snprintf(g_server, sizeof(g_server), "%s", DEFAULT_SERVER);
+        store_save_server(g_server);
+        return 1;
+    }
     while (appletMainLoop()) {
         int r = prompt_text("URL do servidor Meruem (https://...)", url, sizeof(url), 0);
         if (r == -1) return 0;

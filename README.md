@@ -1,17 +1,20 @@
 # Meruem — Leitor de CBZ para Nintendo Switch
 
-Homebrew (`.nro`) que lê quadrinhos/mangás de um servidor Meruem configurado no SD.
+Homebrew (`.nro`) que lê quadrinhos/mangás do servidor Meruem.
 
 > ⚠️ **Local do projeto:** `C:\MeruemSwitch` (sem espaço no caminho). O `make` do devkitPro
 > quebra com espaços, por isso NÃO usamos `C:\...\Meruem Switch`.
 
 ## Servidor
-Na primeira execução, o app pede a URL do servidor e salva em:
+O app usa por padrão:
+```text
+https://meruem.tonserverlocal.uk
+```
+
+Para trocar o servidor sem recompilar, edite no SD:
 ```text
 sdmc:/switch/Meruem/server.txt
 ```
-
-Use uma URL no formato `https://seu-dominio`.
 
 ## Como compilar
 **Opção 1 (mais fácil):** clique com o botão direito em `build.ps1` → *Executar com o PowerShell*.

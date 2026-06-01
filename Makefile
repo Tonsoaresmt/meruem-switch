@@ -13,7 +13,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 # Metadados do app (gravados no NACP / mostrados no Homebrew Menu)
 #---------------------------------------------------------------------------------
 APP_TITLE	:=	Meruem
-APP_AUTHOR	:=	Everton
+APP_AUTHOR	:=	Meruem
 APP_VERSION	:=	0.6.1
 UPDATE_REPO_OWNER	?=	Tonsoaresmt
 UPDATE_REPO_NAME	?=	meruem-switch

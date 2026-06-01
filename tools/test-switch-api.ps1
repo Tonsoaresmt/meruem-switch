@@ -5,13 +5,12 @@
 # Opcional: -User / -Pass / -BaseUrl
 
 param(
-    [string]$BaseUrl,
+    [string]$BaseUrl = "https://meruem.tonserverlocal.uk",
     [string]$User,
     [string]$Pass
 )
 
 $ErrorActionPreference = "Stop"
-if (-not $BaseUrl) { $BaseUrl = Read-Host "URL do servidor Meruem" }
 if (-not $User) { $User = Read-Host "Usuario Meruem" }
 if (-not $Pass) { $Pass = Read-Host "Senha Meruem" }
 
