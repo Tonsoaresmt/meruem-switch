@@ -581,9 +581,18 @@ static int maybe_install_update(void) {
     int rc;
 
     present_color(20, 20, 40);
+    begin_frame();
+    draw_background();
+    text_draw(gRen, "Meruem", 40, 190, COL_HEAD, 1);
+    text_draw(gRen, "Procurando atualizacoes...", 40, 260, COL_SEL, 0);
+    text_draw(gRen, "Versao atual: " APP_VERSION_STR, 40, 304, COL_DIM, 0);
+    end_frame();
     rc = update_check(&info);
     if (rc == UPDATE_CHECK_DISABLED || rc == UPDATE_CHECK_UP_TO_DATE) return 0;
-    if (rc == UPDATE_CHECK_ERROR) return 0;
+    if (rc == UPDATE_CHECK_ERROR) {
+        message_screen("Nao consegui consultar atualizacoes.", info.message[0] ? info.message : "O app vai continuar normalmente.");
+        return 0;
+    }
 
     snprintf(line1, sizeof(line1), "Nova versao encontrada: %s", info.latest_version);
     snprintf(line2, sizeof(line2), "Atual: %s    Asset: %s", APP_VERSION_STR,
@@ -596,7 +605,7 @@ static int maybe_install_update(void) {
         return 0;
     }
 
-    message_screen("Atualizacao instalada com sucesso.", "Feche e abra o Meruem de novo.");
+    message_screen("Atualizacao instalada com sucesso.", "Feche o app e abra novamente.");
     return 1;
 }
 
