@@ -90,6 +90,7 @@ static int chapCount = 0, chapSel = 0, chapScroll = 0;
 static char curSeriesTitle[256] = {0};
 static char curSeriesId[96] = {0};
 static char curSeriesCover[640] = {0};
+static int chapReversed = 0;              // 1 = mostrar do mais novo pro mais antigo
 static Screen g_chapters_back = SC_SERIES;
 static Screen g_reader_back = SC_CHAPTERS;   // pra onde o leitor volta no B
 
@@ -189,7 +190,11 @@ static const char *json_str(cJSON *o, const char *k, const char *fb) {
     return (cJSON_IsString(it) && it->valuestring) ? it->valuestring : fb;
 }
 static cJSON *cat_series_at(int i) { return cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(g_cat, "series"), i); }
-static cJSON *chap_at(int i) { return cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"), i); }
+static cJSON *chap_at_raw(int i) { return cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"), i); }
+static cJSON *chap_at(int i) {
+    if (chapReversed && chapCount > 0) return chap_at_raw(chapCount - 1 - i);
+    return chap_at_raw(i);
+}
 
 // ---------------- canvas / frame / rotacao ----------------
 static void ensure_canvas(void) {
@@ -269,6 +274,7 @@ static Btn btn_prev(void)   { Btn b = { 6, LH() - 50, 110, 40, "< Pag" };  retur
 static Btn btn_next(void)   { Btn b = { LW() - 116, LH() - 50, 110, 40, "Pag >" }; return b; }
 static Btn btn_up(void)     { Btn b = { LW() - 76, TB + 8, 68, 64, "/\\" }; return b; }
 static Btn btn_down(void)   { Btn b = { LW() - 76, LH() - FOOTER_H - 76, 68, 64, "\\/" }; return b; }
+static Btn btn_chap_order(void) { Btn b = { LW() - 312, 8, 170, TB - 14, chapReversed ? "Mais antigos" : "Mais novos" }; return b; }
 static Btn btn_next_open(void) { Btn b = { LW()/2 - 210, LH()/2 + 44, 190, 46, "Abrir agora" }; return b; }
 static Btn btn_next_cancel(void) { Btn b = { LW()/2 + 20, LH()/2 + 44, 170, 46, "Cancelar" }; return b; }
 static Btn btn_switch_account(void) { Btn b = { 30, LH() - FOOTER_H - 72, 230, 50, "Trocar conta" }; return b; }
@@ -408,33 +414,6 @@ static void draw_more_hint(int scroll, int count, int vis) {
     SDL_DestroyTexture(t);
 }
 
-static void draw_series_help(int shownStart, int shownEnd, int total) {
-    char line[220];
-    if (shownStart < 1) shownStart = 1;
-    if (shownEnd < shownStart) shownEnd = shownStart;
-    snprintf(line, sizeof(line), "A Abrir   B Continuar   X %s   Y Area   L/R Paginas   ZL/ZR Girar",
-             catViewMode ? "Capas" : "Lista");
-    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 218);
-    SDL_Rect box = { 18, LH() - FOOTER_H - 38, LW() - 36, 32 };
-    SDL_RenderFillRect(gRen, &box);
-    SDL_SetRenderDrawColor(gRen, 52, 67, 92, 220);
-    SDL_RenderDrawRect(gRen, &box);
-    text_draw(gRen, line, box.x + 12, box.y + 7, COL_SOFT, 0);
-
-    snprintf(line, sizeof(line), "%d-%d de %d", shownStart, shownEnd, total);
-    int tw = 0, th = 0;
-    SDL_Texture *t = text_make(gRen, line, COL_HEAD, 0, &tw, &th);
-    if (!t) return;
-    SDL_Rect badge = { LW() - tw - 28, TB + 8, tw + 18, th + 12 };
-    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 210);
-    SDL_RenderFillRect(gRen, &badge);
-    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 150);
-    SDL_RenderDrawRect(gRen, &badge);
-    SDL_Rect d = { badge.x + 9, badge.y + 6, tw, th };
-    SDL_RenderCopy(gRen, t, NULL, &d);
-    SDL_DestroyTexture(t);
-}
-
 static void draw_selected_card_focus(int x, int y, int w, int h) {
     SDL_SetRenderDrawColor(gRen, 250, 215, 120, 42);
     SDL_Rect glow = { x - 8, y - 8, w + 16, h + 54 };
@@ -450,23 +429,6 @@ static void draw_selected_card_focus(int x, int y, int w, int h) {
     SDL_SetRenderDrawColor(gRen, 250, 215, 120, 190);
     SDL_RenderDrawRect(gRen, &chip);
     text_draw(gRen, "A Abrir", chip.x + 12, chip.y + 5, COL_HEAD, 0);
-}
-
-static void draw_catalog_status_chip(const char *title, int page, int pages, int item, int total) {
-    char line[160];
-    if (item > 0 && total > 0) snprintf(line, sizeof(line), "%s  p%d/%d  %d/%d", title, page, pages, item, total);
-    else snprintf(line, sizeof(line), "%s  p%d/%d", title, page, pages);
-    int tw = 0, th = 0;
-    SDL_Texture *t = text_make(gRen, line, COL_HEAD, 0, &tw, &th);
-    if (!t) return;
-    SDL_Rect bg = { 18, TB + 8, tw + 20, th + 12 };
-    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 212);
-    SDL_RenderFillRect(gRen, &bg);
-    SDL_SetRenderDrawColor(gRen, 92, 152, 76, 170);
-    SDL_RenderDrawRect(gRen, &bg);
-    SDL_Rect d = { bg.x + 10, bg.y + 6, tw, th };
-    SDL_RenderCopy(gRen, t, NULL, &d);
-    SDL_DestroyTexture(t);
 }
 
 // ---------------- rede ----------------
@@ -1065,13 +1027,16 @@ static void enter_reader(int idx) {
     if (pageCount < 1) pageCount = 1;
     snprintf(curChapLabel, sizeof(curChapLabel), "#%s", json_str(c, "number", "?"));
     snprintf(curBookId, sizeof(curBookId), "%s", json_str(c, "id", ""));
-    curChapIndex = idx;
+    // O indice real no array (pra next-chapter funcionar certo):
+    curChapIndex = (chapReversed && chapCount > 0) ? (chapCount - 1 - idx) : idx;
     curPage = store_get_progress(curBookId);
     if (curPage > pageCount) curPage = pageCount;
     if (curPage < 1) curPage = 1;
-    present_color(20, 20, 40);
-    if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; }
-    pageTex = load_page(pageBase, curPage);
+    {
+        SDL_Texture *newTex = load_page(pageBase, curPage);
+        if (pageTex) SDL_DestroyTexture(pageTex);
+        pageTex = newTex;
+    }
     reader_reset_view();
     next_prompt_started = 0;
     next_prompt_cancelled = 0;
@@ -1108,7 +1073,7 @@ static void enter_reader_from_record(const char *bookId) {
         if (g_ser) {
             chapCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"));
             for (int i = 0; i < chapCount; i++) {
-                cJSON *c = chap_at(i);
+                cJSON *c = chap_at_raw(i);
                 if (c && strcmp(json_str(c, "id", ""), bookId) == 0) {
                     curChapIndex = i;
                     chapSel = i;
@@ -1117,9 +1082,11 @@ static void enter_reader_from_record(const char *bookId) {
             }
         }
     }
-    present_color(20, 20, 40);
-    if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; }
-    pageTex = load_page(pageBase, curPage);
+    {
+        SDL_Texture *newTex = load_page(pageBase, curPage);
+        if (pageTex) SDL_DestroyTexture(pageTex);
+        pageTex = newTex;
+    }
     reader_reset_view();
     next_prompt_started = 0;
     next_prompt_cancelled = 0;
@@ -1193,8 +1160,11 @@ static void reader_page_rect(SDL_Rect *dst) {
 }
 
 static int reader_has_next_chapter(void) {
+    // curChapIndex e o indice REAL (nao invertido) no array JSON
     return g_ser && curChapIndex >= 0 && curChapIndex + 1 < chapCount;
 }
+// Abre o proximo capitulo usando indice REAL no array (nao invertido)
+static cJSON *chap_at_real(int i) { return chap_at_raw(i); }
 
 static void reader_start_next_prompt(void) {
     if (curPage == pageCount && reader_has_next_chapter() && !next_prompt_cancelled && next_prompt_started == 0) {
@@ -1208,9 +1178,10 @@ static void reader_open_page(int n, int atBottom) {
     if (n > pageCount) n = pageCount;
     if (pageTex && n == curPage) { reader_start_next_prompt(); return; }
     curPage = n;
-    present_color(20, 20, 40);
-    if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; }
-    pageTex = load_page(pageBase, curPage);
+    // Nao escurece: mantem a imagem anterior visivel ate a nova chegar (evita flash).
+    SDL_Texture *newTex = load_page(pageBase, curPage);
+    if (pageTex) SDL_DestroyTexture(pageTex);
+    pageTex = newTex;
     reader_reset_view();
     next_prompt_started = 0;
     next_prompt_cancelled = 0;
@@ -1224,7 +1195,26 @@ static void reader_advance(int dir) {
 
 static void reader_open_next_chapter_now(void) {
     if (!reader_has_next_chapter()) return;
-    enter_reader(curChapIndex + 1);
+    int nextReal = curChapIndex + 1;
+    cJSON *c = chap_at_real(nextReal);
+    if (!c) return;
+    const char *pb = json_str(c, "pageBase", "");
+    if (!pb[0]) return;
+    snprintf(pageBase, sizeof(pageBase), "%s%s", g_server, pb);
+    pageCount = json_int(c, "pages", 1);
+    if (pageCount < 1) pageCount = 1;
+    snprintf(curChapLabel, sizeof(curChapLabel), "#%s", json_str(c, "number", "?"));
+    snprintf(curBookId, sizeof(curBookId), "%s", json_str(c, "id", ""));
+    curChapIndex = nextReal;
+    curPage = 1;
+    SDL_Texture *newTex = load_page(pageBase, curPage);
+    if (pageTex) SDL_DestroyTexture(pageTex);
+    pageTex = newTex;
+    reader_reset_view();
+    next_prompt_started = 0;
+    next_prompt_cancelled = 0;
+    reader_start_next_prompt();
+    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
 }
 
 static void reader_tick(void) {
@@ -1233,7 +1223,7 @@ static void reader_tick(void) {
 }
 
 // ---------------- render ----------------
-static void draw_topbar(const char *title, Btn left) {
+static void draw_topbar_reserved(const char *title, Btn left, int rightX) {
     SDL_SetRenderDrawColor(gRen, 16, 20, 31, 245);
     SDL_Rect bar = { 0, 0, LW(), TB };
     SDL_RenderFillRect(gRen, &bar);
@@ -1241,7 +1231,29 @@ static void draw_topbar(const char *title, Btn left) {
     SDL_RenderDrawLine(gRen, 0, TB - 1, LW(), TB - 1);
     btn_draw(left);
     btn_draw(btn_rotate());
-    if (title) text_draw(gRen, title, left.x + left.w + 16, 12, COL_HEAD, 0);
+    if (title) {
+        int maxW = rightX - (left.x + left.w + 24);
+        if (maxW < 60) maxW = 60;
+        char trunc[200];
+        snprintf(trunc, sizeof(trunc), "%s", title);
+        // Trunca antes de invadir os botoes da direita.
+        int est = (int)strlen(trunc) * 10;
+        if (est > maxW) {
+            int max = (maxW / 10) - 3;
+            if (max < 1) max = 1;
+            if (max < (int)sizeof(trunc) - 4) {
+                trunc[max] = '.';
+                trunc[max + 1] = '.';
+                trunc[max + 2] = '.';
+                trunc[max + 3] = '\0';
+            }
+        }
+        text_draw(gRen, trunc, left.x + left.w + 16, 12, COL_HEAD, 0);
+    }
+}
+
+static void draw_topbar(const char *title, Btn left) {
+    draw_topbar_reserved(title, left, btn_rotate().x);
 }
 
 static void render_series(void) {
@@ -1304,11 +1316,9 @@ static void render_series(void) {
             cJSON *s = cat_series_at(idx);
             const char *title = json_str(s, "title", "(sem titulo)");
             draw_row_shell(y, idx == catSel);
-            char row[320], meta[160];
-            snprintf(row, sizeof(row), "%.46s", title);
-            snprintf(meta, sizeof(meta), "%s  item %d de %d  .  A abre capitulos", catTitle, idx + 1, catCount);
-            text_draw(gRen, row, 24, y + 8, idx == catSel ? COL_SEL : COL_TEXT, 0);
-            text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
+            char row[320];
+            snprintf(row, sizeof(row), "%.58s", title);
+            text_draw(gRen, row, 24, y + 22, idx == catSel ? COL_SEL : COL_TEXT, 0);
         }
         shownStart = catScroll + 1;
         shownEnd = catScroll + vis;
@@ -1317,8 +1327,6 @@ static void render_series(void) {
         draw_more_hint(catScroll, catCount, vis);
     }
     draw_footer(catalogFavorites ? "B/Biblioteca: voltar    Favoritos vem do site Meruem    X: alternar visual" : NULL);
-    draw_catalog_status_chip(hd, catPage + 1, catTotal, shownStart, catCount);
-    if (catCount > 0) draw_series_help(shownStart, shownEnd, catCount);
     btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search()); btn_draw(btn_view_mode()); btn_draw(btn_next());
 }
 
@@ -1360,8 +1368,10 @@ static void render_settings(void) {
 static void render_chapters(void) {
     draw_background();
     char hd[200];
-    snprintf(hd, sizeof(hd), "%.30s (%d cap)", curSeriesTitle, chapCount);
-    draw_topbar(hd, btn_back());
+    snprintf(hd, sizeof(hd), "%.20s (%d)", curSeriesTitle, chapCount);
+    Btn orderBtn = btn_chap_order();
+    draw_topbar_reserved(hd, btn_back(), orderBtn.x);
+    btn_draw(orderBtn);
 
     int vis = visible_rows();
     if (chapCount == 0) draw_empty_state("Sem capitulos", "Esta serie nao retornou capitulos.");
@@ -1439,11 +1449,10 @@ static void render_reader(void) {
         btn_draw(btn_back());
         btn_draw(btn_rotate());
         char pc[160];
-        snprintf(pc, sizeof(pc), "%.34s  %s  Pagina %d/%d", curSeriesTitle, curChapLabel, curPage, pageCount);
+        int maxPcW = btn_rotate().x - (btn_back().x + btn_back().w + 24);
+        snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
         text_draw(gRen, pc, btn_back().x + btn_back().w + 14, 12, COL_SEL, 0);
-        text_draw(gRen, rd_zoom > 1.02f ? "Arraste para mover . pinca para zoom . toque para ocultar"
-                                        : "Arraste horizontal vira pagina . pinca para zoom . toque mostra/oculta",
-                  18, LH() - 46, COL_DIM, 0);
+        (void)maxPcW;
     }
     if (next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) {
         Uint32 elapsed = SDL_GetTicks() - next_prompt_started;
@@ -1456,7 +1465,7 @@ static void render_reader(void) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Proximo capitulo em %ds", left);
         text_draw(gRen, msg, box.x + 32, box.y + 24, COL_HEAD, 1);
-        cJSON *next = chap_at(curChapIndex + 1);
+        cJSON *next = chap_at_real(curChapIndex + 1);
         snprintf(msg, sizeof(msg), "Capitulo #%s", json_str(next, "number", "?"));
         text_draw(gRen, msg, box.x + 32, box.y + 62, COL_SEL, 0);
         btn_draw(btn_next_open());
@@ -1522,6 +1531,7 @@ static void handle_tap(int lx, int ly) {
         }
     } else if (screen == SC_CHAPTERS) {
         if (btn_hit(btn_back(), lx, ly)) { screen = g_chapters_back; return; }
+        if (btn_hit(btn_chap_order(), lx, ly)) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; return; }
         if (btn_hit(btn_up(), lx, ly))   { chapScroll -= visible_rows(); if (chapScroll < 0) chapScroll = 0; return; }
         if (btn_hit(btn_down(), lx, ly)) { chapScroll += visible_rows(); if (chapScroll > chapCount - 1) chapScroll = (chapCount > 0 ? chapCount - 1 : 0); return; }
         if (ly >= LIST_Y && ly < LIST_Y + visible_rows() * ROW_H) {
@@ -1824,6 +1834,7 @@ int main(int argc, char **argv) {
                             else if (b == JOY_DOWN && chapSel < chapCount - 1) chapSel++;
                             else if (b == JOY_L) { chapSel -= visible_rows(); if (chapSel < 0) chapSel = 0; }
                             else if (b == JOY_R) { chapSel += visible_rows(); if (chapSel > chapCount - 1) chapSel = chapCount - 1; }
+                            else if (b == JOY_X || b == JOY_Y) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; }
                             else if (b == JOY_A && chapCount > 0) enter_reader(chapSel);
                             else if (b == JOY_B) screen = g_chapters_back;
                             if (chapSel < chapScroll) chapScroll = chapSel;
