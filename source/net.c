@@ -54,7 +54,7 @@ long net_request(const char *url, const char *method,
     struct curl_slist *headers = NULL;
     if (body) headers = curl_slist_append(headers, "Content-Type: application/json");
 
-    char authbuf[160];
+    char authbuf[1024];
     if (bearer && bearer[0]) {
         snprintf(authbuf, sizeof(authbuf), "Authorization: Bearer %s", bearer);
         headers = curl_slist_append(headers, authbuf);
@@ -97,7 +97,7 @@ long net_download_file(const char *url, const char *bearer,
     CURL *curl;
     CURLcode res;
     struct curl_slist *headers = NULL;
-    char authbuf[160];
+    char authbuf[1024];
     FILE *f;
     long code = -1;
 

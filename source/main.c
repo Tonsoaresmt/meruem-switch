@@ -85,12 +85,19 @@ static char g_self_path[512] = {0};
 
 typedef struct {
     char id[96];
+    char url[640];
+    char token[512];
     SDL_Texture *tex;
+    SDL_Thread *thread;
+    unsigned char *data;
+    size_t len;
+    volatile int ready;
+    volatile int loading;
     int failed;
 } CoverCacheEntry;
 
 static CoverCacheEntry g_cover_cache[COVER_CACHE_MAX];
-static int g_cover_loaded_this_frame = 0;
+static int g_cover_started_this_frame = 0;
 
 // estado do toque
 static int  fingerDown = 0;
@@ -354,28 +361,65 @@ static SDL_Texture *load_page(const char *baseUrl, int page) {
 
 static void cover_cache_clear(void) {
     for (int i = 0; i < COVER_CACHE_MAX; i++) {
+        if (g_cover_cache[i].thread) {
+            SDL_WaitThread(g_cover_cache[i].thread, NULL);
+            g_cover_cache[i].thread = NULL;
+        }
         if (g_cover_cache[i].tex) SDL_DestroyTexture(g_cover_cache[i].tex);
+        free(g_cover_cache[i].data);
         g_cover_cache[i].tex = NULL;
+        g_cover_cache[i].data = NULL;
+        g_cover_cache[i].len = 0;
+        g_cover_cache[i].ready = 0;
+        g_cover_cache[i].loading = 0;
         g_cover_cache[i].failed = 0;
         g_cover_cache[i].id[0] = '\0';
+        g_cover_cache[i].url[0] = '\0';
+        g_cover_cache[i].token[0] = '\0';
     }
 }
 
-static SDL_Texture *load_image_url(const char *url) {
+static int cover_download_thread(void *arg) {
+    CoverCacheEntry *entry = (CoverCacheEntry *)arg;
     struct membuf buf = {0};
-    SDL_Texture *tex = NULL;
-    long code = net_request(url, "GET", NULL, g_token, &buf, NULL);
+    long code = net_request(entry->url, "GET", NULL, entry->token, &buf, NULL);
     if (code == 200 && buf.data && buf.len > 0) {
-        SDL_RWops *rw = SDL_RWFromConstMem(buf.data, (int)buf.len);
-        SDL_Surface *surf = IMG_Load_RW(rw, 1);
-        if (surf) {
-            tex = SDL_CreateTextureFromSurface(gRen, surf);
-            if (tex) SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
-            SDL_FreeSurface(surf);
-        }
+        entry->data = (unsigned char *)buf.data;
+        entry->len = buf.len;
+        buf.data = NULL;
+        buf.len = 0;
+    } else {
+        entry->failed = 1;
     }
     membuf_free(&buf);
-    return tex;
+    entry->loading = 0;
+    entry->ready = 1;
+    return 0;
+}
+
+static void cover_cache_pump(void) {
+    for (int i = 0; i < COVER_CACHE_MAX; i++) {
+        CoverCacheEntry *e = &g_cover_cache[i];
+        if (!e->ready) continue;
+        if (e->thread) {
+            SDL_WaitThread(e->thread, NULL);
+            e->thread = NULL;
+        }
+        e->ready = 0;
+        if (e->data && e->len > 0) {
+            SDL_RWops *rw = SDL_RWFromConstMem(e->data, (int)e->len);
+            SDL_Surface *surf = IMG_Load_RW(rw, 1);
+            if (surf) {
+                e->tex = SDL_CreateTextureFromSurface(gRen, surf);
+                if (e->tex) SDL_SetTextureScaleMode(e->tex, SDL_ScaleModeLinear);
+                SDL_FreeSurface(surf);
+            }
+            free(e->data);
+            e->data = NULL;
+            e->len = 0;
+            if (!e->tex) e->failed = 1;
+        }
+    }
 }
 
 static SDL_Texture *series_cover_texture(cJSON *series) {
@@ -385,23 +429,27 @@ static SDL_Texture *series_cover_texture(cJSON *series) {
     if (!id[0] || !cover[0]) return NULL;
     for (int i = 0; i < COVER_CACHE_MAX; i++) {
         if (g_cover_cache[i].id[0] && strcmp(g_cover_cache[i].id, id) == 0) {
-            if (g_cover_cache[i].failed) return NULL;
+            if (g_cover_cache[i].failed || g_cover_cache[i].loading) return NULL;
             return g_cover_cache[i].tex;
         }
         if (empty < 0 && !g_cover_cache[i].id[0]) empty = i;
     }
-    if (empty < 0 || g_cover_loaded_this_frame) return NULL;
-    g_cover_loaded_this_frame = 1;
+    if (empty < 0 || g_cover_started_this_frame) return NULL;
+    g_cover_started_this_frame = 1;
     snprintf(g_cover_cache[empty].id, sizeof(g_cover_cache[empty].id), "%s", id);
-    char url[640];
     if (strncmp(cover, "http://", 7) == 0 || strncmp(cover, "https://", 8) == 0) {
-        snprintf(url, sizeof(url), "%s", cover);
+        snprintf(g_cover_cache[empty].url, sizeof(g_cover_cache[empty].url), "%s", cover);
     } else {
-        snprintf(url, sizeof(url), "%s%s", g_server, cover);
+        snprintf(g_cover_cache[empty].url, sizeof(g_cover_cache[empty].url), "%s%s", g_server, cover);
     }
-    g_cover_cache[empty].tex = load_image_url(url);
-    g_cover_cache[empty].failed = g_cover_cache[empty].tex ? 0 : 1;
-    return g_cover_cache[empty].tex;
+    snprintf(g_cover_cache[empty].token, sizeof(g_cover_cache[empty].token), "%s", g_token ? g_token : "");
+    g_cover_cache[empty].loading = 1;
+    g_cover_cache[empty].thread = SDL_CreateThread(cover_download_thread, "cover", &g_cover_cache[empty]);
+    if (!g_cover_cache[empty].thread) {
+        g_cover_cache[empty].loading = 0;
+        g_cover_cache[empty].failed = 1;
+    }
+    return NULL;
 }
 
 // ---------------- teclado / login ----------------
@@ -502,7 +550,7 @@ static int login_intro_screen(void) {
 }
 
 static int authenticate(void) {
-    char tok[160];
+    char tok[512];
     if (store_load_token(tok, sizeof(tok))) {
         present_color(20, 20, 40);
         if (token_is_valid(tok)) { g_token = strdup(tok); return 1; }
@@ -578,7 +626,6 @@ static int configure_server(void) {
 static void load_catalog(void) {
     present_color(20, 20, 40);
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
-    cover_cache_clear();
     char url[512];
     int n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
                      g_server,
@@ -692,7 +739,8 @@ static void draw_topbar(const char *title, Btn left) {
 
 static void render_series(void) {
     draw_background();
-    g_cover_loaded_this_frame = 0;
+    g_cover_started_this_frame = 0;
+    cover_cache_pump();
     char hd[200];
     if (g_search[0]) snprintf(hd, sizeof(hd), "%s  busca: %.18s  pag %d/%d", AREAS[areaIdx], g_search, catPage + 1, catTotal);
     else             snprintf(hd, sizeof(hd), "%s  pag %d/%d", AREAS[areaIdx], catPage + 1, catTotal);
