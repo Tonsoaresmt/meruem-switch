@@ -55,7 +55,7 @@
 #define JOY_ZL     8
 #define JOY_ZR     9
 
-typedef enum { SC_SERIES, SC_CONTINUE, SC_CHAPTERS, SC_READER } Screen;
+typedef enum { SC_SERIES, SC_FAVORITES, SC_SETTINGS, SC_CONTINUE, SC_CHAPTERS, SC_READER } Screen;
 
 static SDL_Renderer *gRen = NULL;
 static SDL_Texture  *gCanvas = NULL;
@@ -70,6 +70,16 @@ static char g_search[96] = {0};
 static int catViewMode = 0; // 0 = capas, 1 = lista compacta
 
 static Screen screen = SC_SERIES;
+static int catalogFavorites = 0;
+static int catalogLoadFailed = 0;
+
+static int profileLoaded = 0;
+static int profileFailed = 0;
+static char profileTier[32] = "";
+static char profileAccess[128] = "";
+static char profileChapters[128] = "";
+static char profileBooks[128] = "";
+static char profileCounts[160] = "";
 
 static cJSON *g_cat = NULL;
 static int catPage = 0, catTotal = 1, catCount = 0, catSel = 0, catScroll = 0;
@@ -79,6 +89,7 @@ static int chapCount = 0, chapSel = 0, chapScroll = 0;
 static char curSeriesTitle[256] = {0};
 static char curSeriesId[96] = {0};
 static char curSeriesCover[640] = {0};
+static Screen g_chapters_back = SC_SERIES;
 static Screen g_reader_back = SC_CHAPTERS;   // pra onde o leitor volta no B
 
 // "Continuar lendo"
@@ -245,6 +256,8 @@ static Btn btn_back(void)   { Btn b = { 6, 8, 150, TB - 14, "< Voltar" }; return
 static Btn btn_exit(void)   { Btn b = { 6, 8, 110, TB - 14, "Sair" };     return b; }
 static Btn btn_rotate(void) { Btn b = { LW() - 130, 8, 124, TB - 14, "Girar" }; return b; }
 static Btn btn_continue(void) { Btn b = { 124, 8, 150, TB - 14, "Continuar" }; return b; }
+static Btn btn_favorites(void) { Btn b = { 282, 8, 140, TB - 14, "Favoritos" }; return b; }
+static Btn btn_settings(void) { Btn b = { 430, 8, 120, TB - 14, "Conta" }; return b; }
 static Btn btn_library(void)  { Btn b = { 6, 8, 160, TB - 14, "Biblioteca" }; return b; }
 static Btn btn_area(void)   { Btn b = { LW()/2 - 170, LH() - 50, 110, 40, "Area" };  return b; }
 static Btn btn_search(void) { Btn b = { LW()/2 - 50, LH() - 50, 120, 40, "Buscar" }; return b; }
@@ -255,6 +268,11 @@ static Btn btn_up(void)     { Btn b = { LW() - 76, TB + 8, 68, 64, "/\\" }; retu
 static Btn btn_down(void)   { Btn b = { LW() - 76, LH() - FOOTER_H - 76, 68, 64, "\\/" }; return b; }
 static Btn btn_next_open(void) { Btn b = { LW()/2 - 210, LH()/2 + 44, 190, 46, "Abrir agora" }; return b; }
 static Btn btn_next_cancel(void) { Btn b = { LW()/2 + 20, LH()/2 + 44, 170, 46, "Cancelar" }; return b; }
+static Btn btn_switch_account(void) { Btn b = { 30, LH() - FOOTER_H - 72, 230, 50, "Trocar conta" }; return b; }
+
+static int is_catalog_screen(void) {
+    return screen == SC_SERIES || screen == SC_FAVORITES;
+}
 
 static void draw_background(void) {
     SDL_SetRenderDrawColor(gRen, 13, 16, 26, 255);
@@ -420,6 +438,23 @@ static void draw_selected_card_focus(int x, int y, int w, int h) {
     SDL_SetRenderDrawColor(gRen, 250, 215, 120, 190);
     SDL_RenderDrawRect(gRen, &chip);
     text_draw(gRen, "A Abrir", chip.x + 12, chip.y + 5, COL_HEAD, 0);
+}
+
+static void draw_catalog_status_chip(const char *title, int page, int pages, int item, int total) {
+    char line[160];
+    if (item > 0 && total > 0) snprintf(line, sizeof(line), "%s  p%d/%d  %d/%d", title, page, pages, item, total);
+    else snprintf(line, sizeof(line), "%s  p%d/%d", title, page, pages);
+    int tw = 0, th = 0;
+    SDL_Texture *t = text_make(gRen, line, COL_HEAD, 0, &tw, &th);
+    if (!t) return;
+    SDL_Rect bg = { 18, TB + 8, tw + 20, th + 12 };
+    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 212);
+    SDL_RenderFillRect(gRen, &bg);
+    SDL_SetRenderDrawColor(gRen, 92, 152, 76, 170);
+    SDL_RenderDrawRect(gRen, &bg);
+    SDL_Rect d = { bg.x + 10, bg.y + 6, tw, th };
+    SDL_RenderCopy(gRen, t, NULL, &d);
+    SDL_DestroyTexture(t);
 }
 
 // ---------------- rede ----------------
@@ -849,6 +884,8 @@ static int configure_server(void) {
 static void load_catalog(void) {
     present_color(20, 20, 40);
     cover_cache_clear();   // libera as capas da pagina anterior
+    catalogFavorites = 0;
+    catalogLoadFailed = 0;
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
     char url[512];
     int n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
@@ -870,6 +907,88 @@ static void load_catalog(void) {
     }
     if (catSel >= catCount) catSel = catCount > 0 ? catCount - 1 : 0;
     if (catSel < 0) catSel = 0;
+}
+
+static void load_favorites(void) {
+    present_color(20, 20, 40);
+    cover_cache_clear();
+    catalogFavorites = 1;
+    catalogLoadFailed = 0;
+    if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
+    char url[512];
+    snprintf(url, sizeof(url), "%s/switch/favorites?size=%d&page=%d", g_server, PAGE_SIZE, catPage);
+    struct membuf r = {0};
+    long code = net_request(url, "GET", NULL, g_token, &r, NULL);
+    if (code == 200 && r.data) g_cat = cJSON_Parse(r.data);
+    else catalogLoadFailed = 1;
+    membuf_free(&r);
+    catCount = 0; catTotal = 1; catScroll = 0;
+    if (g_cat) {
+        catTotal = json_int(g_cat, "totalPages", 1);
+        catCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_cat, "series"));
+    }
+    if (catSel >= catCount) catSel = catCount > 0 ? catCount - 1 : 0;
+    if (catSel < 0) catSel = 0;
+}
+
+static void load_profile(void) {
+    profileLoaded = 0;
+    profileFailed = 0;
+    profileTier[0] = '\0';
+    profileAccess[0] = '\0';
+    profileChapters[0] = '\0';
+    profileBooks[0] = '\0';
+    profileCounts[0] = '\0';
+
+    char url[512];
+    snprintf(url, sizeof(url), "%s/switch/me", g_server);
+    struct membuf r = {0};
+    long code = net_request(url, "GET", NULL, g_token, &r, NULL);
+    if (code != 200 || !r.data) {
+        profileFailed = 1;
+        membuf_free(&r);
+        return;
+    }
+
+    cJSON *root = cJSON_Parse(r.data);
+    membuf_free(&r);
+    if (!root) {
+        profileFailed = 1;
+        return;
+    }
+
+    cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
+    cJSON *limits = cJSON_GetObjectItemCaseSensitive(root, "limits");
+    cJSON *chapters = cJSON_GetObjectItemCaseSensitive(limits, "chapters");
+    cJSON *books = cJSON_GetObjectItemCaseSensitive(limits, "books");
+    cJSON *counts = cJSON_GetObjectItemCaseSensitive(root, "counts");
+    const char *tier = json_str(user, "tier", "free");
+    snprintf(profileTier, sizeof(profileTier), "%s", tier);
+
+    int hasFullAccess = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(limits, "hasFullAccess"));
+    snprintf(profileAccess, sizeof(profileAccess), "%s",
+             hasFullAccess ? "Acesso liberado: assinatura/admin sem limite diario." : "Plano Free: leitura com limite diario.");
+
+    if (hasFullAccess) {
+        snprintf(profileChapters, sizeof(profileChapters), "Capitulos: ilimitado");
+        snprintf(profileBooks, sizeof(profileBooks), "Livros: tempo ilimitado");
+    } else {
+        int used = json_int(chapters, "usedToday", 0);
+        int remaining = json_int(chapters, "remainingToday", 0);
+        int limit = json_int(chapters, "limit", 3);
+        int bookRemainingMs = json_int(books, "remainingTodayMs", 0);
+        int bookLimitMs = json_int(books, "limitMs", 15 * 60 * 1000);
+        snprintf(profileChapters, sizeof(profileChapters), "Capitulos hoje: %d/%d usados, %d restantes", used, limit, remaining);
+        snprintf(profileBooks, sizeof(profileBooks), "Livros hoje: %d min restantes de %d min", bookRemainingMs / 60000, bookLimitMs / 60000);
+    }
+
+    snprintf(profileCounts, sizeof(profileCounts), "Favoritos %d  Prateleira %d  Continuar %d",
+             json_int(counts, "favorites", 0),
+             json_int(counts, "libraryPins", 0) + json_int(counts, "shelves", 0),
+             json_int(counts, "continueReading", 0));
+
+    profileLoaded = 1;
+    cJSON_Delete(root);
 }
 
 static void clamp_catalog_scroll_to_selection(void) {
@@ -924,6 +1043,7 @@ static void enter_series(int idx) {
     membuf_free(&r);
     chapCount = 0; chapSel = 0; chapScroll = 0;
     if (g_ser) chapCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"));
+    g_chapters_back = screen;
     screen = SC_CHAPTERS;
 }
 static void enter_reader(int idx) {
@@ -1139,11 +1259,11 @@ static void render_series(void) {
     draw_background();
     g_cover_started_this_frame = 0;
     cover_cache_pump();
-    char hd[200];
+    char hd[80];
+    const char *catTitle = catalogFavorites ? "Favoritos" : AREAS[areaIdx];
     int shownStart = catCount > 0 ? catSel + 1 : 0;
     int shownEnd = shownStart;
-    if (g_search[0]) snprintf(hd, sizeof(hd), "%s  busca: %.18s  pag %d/%d  %s  item %d/%d", AREAS[areaIdx], g_search, catPage + 1, catTotal, catViewMode ? "lista" : "capas", shownStart, catCount);
-    else             snprintf(hd, sizeof(hd), "%s  pag %d/%d  %s  item %d/%d", AREAS[areaIdx], catPage + 1, catTotal, catViewMode ? "lista" : "capas", shownStart, catCount);
+    snprintf(hd, sizeof(hd), "%s", catTitle);
     SDL_SetRenderDrawColor(gRen, 16, 20, 31, 245);
     SDL_Rect tbar = { 0, 0, LW(), TB };
     SDL_RenderFillRect(gRen, &tbar);
@@ -1151,12 +1271,14 @@ static void render_series(void) {
     SDL_RenderDrawLine(gRen, 0, TB - 1, LW(), TB - 1);
     btn_draw(btn_exit());
     btn_draw(btn_continue());
+    btn_draw(btn_favorites());
+    btn_draw(btn_settings());
     btn_draw(btn_rotate());
     draw_version_badge();
-    text_draw(gRen, hd, btn_continue().x + btn_continue().w + 12, 12, COL_HEAD, 0);
 
     if (catCount == 0) {
-        draw_empty_state("Nada encontrado", "Tente outra busca ou troque a area.");
+        if (catalogLoadFailed) draw_empty_state("Favoritos ainda nao conectados", "Precisa da rota /switch/favorites no Meruem web.");
+        else draw_empty_state(catalogFavorites ? "Nenhum favorito" : "Nada encontrado", "Tente outra busca ou troque a area.");
     } else if (catViewMode == 0) {
         int cols = grid_cols(), gap = grid_gap();
         int cardW = grid_card_w(), coverH = grid_cover_h(), cellH = grid_cell_h();
@@ -1206,8 +1328,42 @@ static void render_series(void) {
         draw_more_hint(catScroll, catCount, vis);
     }
     draw_footer(NULL);
+    draw_catalog_status_chip(hd, catPage + 1, catTotal, shownStart, catCount);
     if (catCount > 0) draw_series_help(shownStart, shownEnd, catCount);
     btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search()); btn_draw(btn_view_mode()); btn_draw(btn_next());
+}
+
+static void render_settings(void) {
+    draw_background();
+    draw_topbar("Conta e ajustes", btn_library());
+    SDL_SetRenderDrawColor(gRen, 22, 30, 46, 232);
+    SDL_Rect box = { 28, LIST_Y + 12, LW() - 56, 390 };
+    SDL_RenderFillRect(gRen, &box);
+    SDL_SetRenderDrawColor(gRen, 92, 152, 76, 180);
+    SDL_RenderDrawRect(gRen, &box);
+
+    char line[300];
+    text_draw(gRen, "Perfil Meruem", box.x + 24, box.y + 24, COL_HEAD, 1);
+    snprintf(line, sizeof(line), "Conta logada: %s", g_username[0] ? g_username : "(nao identificada)");
+    text_draw(gRen, line, box.x + 24, box.y + 78, COL_SEL, 0);
+    snprintf(line, sizeof(line), "Servidor: %.52s", g_server[0] ? g_server : DEFAULT_SERVER);
+    text_draw(gRen, line, box.x + 24, box.y + 118, COL_SOFT, 0);
+    text_draw(gRen, "Assinatura e limite diario:", box.x + 24, box.y + 170, COL_HEAD, 0);
+    if (profileLoaded) {
+        snprintf(line, sizeof(line), "Plano: %s", profileTier[0] ? profileTier : "free");
+        text_draw(gRen, line, box.x + 24, box.y + 210, COL_SEL, 0);
+        text_draw(gRen, profileAccess, box.x + 24, box.y + 246, COL_SOFT, 0);
+        text_draw(gRen, profileChapters, box.x + 24, box.y + 282, COL_DIM, 0);
+        text_draw(gRen, profileBooks, box.x + 24, box.y + 318, COL_DIM, 0);
+        text_draw(gRen, profileCounts, box.x + 24, box.y + 354, COL_DIM, 0);
+    } else if (profileFailed) {
+        text_draw(gRen, "Nao foi possivel sincronizar /switch/me agora.", box.x + 24, box.y + 210, COL_DIM, 0);
+        text_draw(gRen, "Atualize o Meruem web no servidor e tente abrir esta tela novamente.", box.x + 24, box.y + 250, COL_DIM, 0);
+    } else {
+        text_draw(gRen, "Sincronizando conta com o Meruem web...", box.x + 24, box.y + 210, COL_DIM, 0);
+    }
+    btn_draw(btn_switch_account());
+    draw_footer("A/toque: acao    B/Biblioteca: voltar    ZL/ZR: girar");
 }
 
 static void render_chapters(void) {
@@ -1333,12 +1489,14 @@ static void handle_tap(int lx, int ly) {
     // botoes comuns no topo
     if (screen != SC_READER && btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); return; }
 
-    if (screen == SC_SERIES) {
+    if (is_catalog_screen()) {
         if (btn_hit(btn_exit(), lx, ly)) { if (running_ptr) *running_ptr = 0; return; }
         if (btn_hit(btn_continue(), lx, ly)) { load_continue(); screen = SC_CONTINUE; return; }
-        if (btn_hit(btn_prev(), lx, ly)) { if (catPage > 0) { catPage--; catSel = 0; load_catalog(); } return; }
-        if (btn_hit(btn_next(), lx, ly)) { if (catPage < catTotal - 1) { catPage++; catSel = 0; load_catalog(); } return; }
-        if (btn_hit(btn_area(), lx, ly)) { areaIdx = (areaIdx + 1) % 3; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); return; }
+        if (btn_hit(btn_favorites(), lx, ly)) { catPage = 0; catSel = 0; load_favorites(); screen = SC_FAVORITES; return; }
+        if (btn_hit(btn_settings(), lx, ly)) { load_profile(); screen = SC_SETTINGS; return; }
+        if (btn_hit(btn_prev(), lx, ly)) { if (catPage > 0) { catPage--; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } return; }
+        if (btn_hit(btn_next(), lx, ly)) { if (catPage < catTotal - 1) { catPage++; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } return; }
+        if (btn_hit(btn_area(), lx, ly)) { areaIdx = (areaIdx + 1) % 3; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); screen = SC_SERIES; return; }
         if (btn_hit(btn_view_mode(), lx, ly)) { toggle_catalog_view(); return; }
         if (btn_hit(btn_search(), lx, ly)) {
             char term[96] = {0};
@@ -1360,8 +1518,18 @@ static void handle_tap(int lx, int ly) {
             int idx = catScroll + (ly - LIST_Y) / ROW_H;
             if (idx >= 0 && idx < catCount) { catSel = idx; enter_series(idx); }
         }
+    } else if (screen == SC_SETTINGS) {
+        if (btn_hit(btn_library(), lx, ly)) { screen = catalogFavorites ? SC_FAVORITES : SC_SERIES; return; }
+        if (btn_hit(btn_switch_account(), lx, ly)) {
+            store_clear_token();
+            store_clear_user();
+            if (g_token) { free(g_token); g_token = NULL; }
+            g_username[0] = '\0';
+            if (authenticate()) { catPage = 0; catSel = 0; load_catalog(); screen = SC_SERIES; }
+            return;
+        }
     } else if (screen == SC_CHAPTERS) {
-        if (btn_hit(btn_back(), lx, ly)) { screen = SC_SERIES; return; }
+        if (btn_hit(btn_back(), lx, ly)) { screen = g_chapters_back; return; }
         if (btn_hit(btn_up(), lx, ly))   { chapScroll -= visible_rows(); if (chapScroll < 0) chapScroll = 0; return; }
         if (btn_hit(btn_down(), lx, ly)) { chapScroll += visible_rows(); if (chapScroll > chapCount - 1) chapScroll = (chapCount > 0 ? chapCount - 1 : 0); return; }
         if (ly >= LIST_Y && ly < LIST_Y + visible_rows() * ROW_H) {
@@ -1384,6 +1552,10 @@ static void handle_tap(int lx, int ly) {
             if (btn_hit(btn_back(), lx, ly)) { if (pageTex) { SDL_DestroyTexture(pageTex); pageTex = NULL; } screen = g_reader_back; return; }
             if (btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); reader_clamp_pan(); reader_show_overlay(); return; }
             return;
+        }
+        if (rd_zoom <= READER_ZOOM_MIN + 0.01f) {
+            if (lx < LW() * 34 / 100) { reader_advance(-1); return; }
+            if (lx > LW() * 66 / 100) { reader_advance(1); return; }
         }
         reader_show_overlay();
     }
@@ -1500,11 +1672,43 @@ static void reader_touch_end(SDL_FingerID id, float nx, float ny) {
 }
 
 // arrasto vertical nas listas -> rola
+static void scroll_current_view(int delta) {
+    if (delta == 0) return;
+    if (is_catalog_screen() && catViewMode == 0) {
+        int cols = grid_cols();
+        int maxRow = (catCount + cols - 1) / cols - grid_visible_rows();
+        if (maxRow < 0) maxRow = 0;
+        catScroll += delta;
+        if (catScroll < 0) catScroll = 0;
+        if (catScroll > maxRow) catScroll = maxRow;
+        return;
+    }
+    int *scroll = NULL, count = 0, vis = visible_rows();
+    if (is_catalog_screen()) { scroll = &catScroll; count = catCount; }
+    else if (screen == SC_CONTINUE) { scroll = &contScroll; count = contN; }
+    else if (screen == SC_CHAPTERS) { scroll = &chapScroll; count = chapCount; }
+    else return;
+    int maxs = count - vis;
+    if (maxs < 0) maxs = 0;
+    *scroll += delta;
+    if (*scroll < 0) *scroll = 0;
+    if (*scroll > maxs) *scroll = maxs;
+}
+
+static void handle_swipe_release(int dx, int dy) {
+    int adx = abs(dx), ady = abs(dy);
+    if (ady < 34 || ady < adx) return;
+    int steps = 1;
+    if (ady > 210) steps = 3;
+    else if (ady > 110) steps = 2;
+    scroll_current_view(dy < 0 ? steps : -steps);
+}
+
 static void handle_drag(int curLY) {
     if (screen == SC_READER) {
         return;
     }
-    if (screen == SC_SERIES && catViewMode == 0) {   // grade: rola por linhas de cards
+    if (is_catalog_screen() && catViewMode == 0) {   // grade: rola por linhas de cards
         int cellH = grid_cell_h();
         int cols = grid_cols();
         int maxRow = (catCount + cols - 1) / cols - grid_visible_rows();
@@ -1517,7 +1721,7 @@ static void handle_drag(int curLY) {
         return;
     }
     int *scroll = NULL, count = 0;
-    if (screen == SC_SERIES) { scroll = &catScroll; count = catCount; }
+    if (is_catalog_screen()) { scroll = &catScroll; count = catCount; }
     else if (screen == SC_CONTINUE)  { scroll = &contScroll; count = contN; }
     else if (screen == SC_CHAPTERS)  { scroll = &chapScroll; count = chapCount; }
     else return;
@@ -1592,7 +1796,12 @@ int main(int argc, char **argv) {
                         if (screen == SC_READER) {
                             reader_touch_end(e.tfinger.fingerId, e.tfinger.x, e.tfinger.y);
                         } else {
-                            if (fingerDown && movedMax <= TAP_THRESH) handle_tap(downLX, downLY);
+                            if (fingerDown) {
+                                int ux, uy;
+                                screen_to_logical(e.tfinger.x, e.tfinger.y, &ux, &uy);
+                                if (movedMax <= TAP_THRESH) handle_tap(downLX, downLY);
+                                else handle_swipe_release(ux - downLX, uy - downLY);
+                            }
                             fingerDown = 0;
                         }
                     } else if (e.type == SDL_JOYBUTTONDOWN) {
@@ -1600,7 +1809,7 @@ int main(int argc, char **argv) {
                         if (b == JOY_PLUS) { running = 0; break; }
                         if (b == JOY_ZL || b == JOY_ZR) { toggle_orientation(); continue; }
 
-                        if (screen == SC_SERIES) {
+                        if (is_catalog_screen()) {
                             int gc = grid_cols();
                             if (catViewMode == 0 && b == JOY_UP) { if (catSel - gc >= 0) catSel -= gc; }
                             else if (catViewMode == 0 && b == JOY_DOWN) { if (catSel + gc < catCount) catSel += gc; }
@@ -1610,8 +1819,8 @@ int main(int argc, char **argv) {
                             else if (catViewMode == 1 && b == JOY_DOWN && catSel < catCount - 1) catSel++;
                             else if (catViewMode == 1 && b == JOY_DLEFT) { catSel -= visible_rows(); if (catSel < 0) catSel = 0; }
                             else if (catViewMode == 1 && b == JOY_DRIGHT) { catSel += visible_rows(); if (catSel > catCount - 1) catSel = catCount - 1; }
-                            else if (b == JOY_L) { if (catPage > 0) { catPage--; catSel = 0; load_catalog(); } }
-                            else if (b == JOY_R) { if (catPage < catTotal - 1) { catPage++; catSel = 0; load_catalog(); } }
+                            else if (b == JOY_L) { if (catPage > 0) { catPage--; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } }
+                            else if (b == JOY_R) { if (catPage < catTotal - 1) { catPage++; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } }
                             else if (b == JOY_Y) { areaIdx = (areaIdx + 1) % 3; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); }
                             else if (b == JOY_X) { toggle_catalog_view(); }
                             else if (b == JOY_MINUS) { store_clear_token(); if (g_token) { free(g_token); g_token = NULL; } if (!authenticate()) { running = 0; break; } catPage = 0; catSel = 0; load_catalog(); }
@@ -1624,7 +1833,7 @@ int main(int argc, char **argv) {
                             else if (b == JOY_L) { chapSel -= visible_rows(); if (chapSel < 0) chapSel = 0; }
                             else if (b == JOY_R) { chapSel += visible_rows(); if (chapSel > chapCount - 1) chapSel = chapCount - 1; }
                             else if (b == JOY_A && chapCount > 0) enter_reader(chapSel);
-                            else if (b == JOY_B) screen = SC_SERIES;
+                            else if (b == JOY_B) screen = g_chapters_back;
                             if (chapSel < chapScroll) chapScroll = chapSel;
                             if (chapSel >= chapScroll + visible_rows()) chapScroll = chapSel - visible_rows() + 1;
                         } else if (screen == SC_CONTINUE) {
@@ -1634,6 +1843,14 @@ int main(int argc, char **argv) {
                             else if (b == JOY_B) screen = SC_SERIES;
                             if (contSel < contScroll) contScroll = contSel;
                             if (contSel >= contScroll + visible_rows()) contScroll = contSel - visible_rows() + 1;
+                        } else if (screen == SC_SETTINGS) {
+                            if (b == JOY_A) {
+                                store_clear_token();
+                                store_clear_user();
+                                if (g_token) { free(g_token); g_token = NULL; }
+                                g_username[0] = '\0';
+                                if (authenticate()) { catPage = 0; catSel = 0; load_catalog(); screen = SC_SERIES; }
+                            } else if (b == JOY_B) screen = catalogFavorites ? SC_FAVORITES : SC_SERIES;
                         } else {
                             if (b == JOY_A && next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) reader_open_next_chapter_now();
                             else if (b == JOY_X && next_prompt_started) { next_prompt_cancelled = 1; next_prompt_started = 0; reader_show_overlay(); }
@@ -1646,8 +1863,9 @@ int main(int argc, char **argv) {
 
                 reader_tick();
                 begin_frame();
-                if (screen == SC_SERIES) render_series();
+                if (is_catalog_screen()) render_series();
                 else if (screen == SC_CONTINUE) render_continue();
+                else if (screen == SC_SETTINGS) render_settings();
                 else if (screen == SC_CHAPTERS) render_chapters();
                 else render_reader();
                 end_frame();
