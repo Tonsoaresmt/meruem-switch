@@ -67,6 +67,7 @@ static char g_username[96] = {0};
 static const char *AREAS[3] = { "manga", "comics", "books" };
 static int areaIdx = 0;
 static char g_search[96] = {0};
+static int catViewMode = 0; // 0 = capas, 1 = lista compacta
 
 static Screen screen = SC_SERIES;
 
@@ -247,6 +248,7 @@ static Btn btn_continue(void) { Btn b = { 124, 8, 150, TB - 14, "Continuar" }; r
 static Btn btn_library(void)  { Btn b = { 6, 8, 160, TB - 14, "Biblioteca" }; return b; }
 static Btn btn_area(void)   { Btn b = { LW()/2 - 170, LH() - 50, 110, 40, "Area" };  return b; }
 static Btn btn_search(void) { Btn b = { LW()/2 - 50, LH() - 50, 120, 40, "Buscar" }; return b; }
+static Btn btn_view_mode(void) { Btn b = { LW()/2 + 80, LH() - 50, 120, 40, catViewMode ? "Capas" : "Lista" }; return b; }
 static Btn btn_prev(void)   { Btn b = { 6, LH() - 50, 110, 40, "< Pag" };  return b; }
 static Btn btn_next(void)   { Btn b = { LW() - 116, LH() - 50, 110, 40, "Pag >" }; return b; }
 static Btn btn_up(void)     { Btn b = { LW() - 76, TB + 8, 68, 64, "/\\" }; return b; }
@@ -336,9 +338,9 @@ static void draw_cover_texture(SDL_Texture *tex, int x, int y, int w, int h) {
     SDL_RenderDrawRect(gRen, &dst);
 }
 
-static void draw_scrollbar(int scroll, int count, int vis) {
+static void draw_scrollbar_units(int scroll, int count, int vis, int unitH) {
     if (count <= vis) return;
-    int trackH = vis * ROW_H - 8;
+    int trackH = vis * unitH - 8;
     int trackY = LIST_Y + 2;
     int trackX = LW() - 10;
     int thumbH = (trackH * vis) / count;
@@ -352,6 +354,72 @@ static void draw_scrollbar(int scroll, int count, int vis) {
     SDL_SetRenderDrawColor(gRen, 250, 215, 120, 220);
     SDL_Rect thumb = { trackX - 1, thumbY, 6, thumbH };
     SDL_RenderFillRect(gRen, &thumb);
+}
+
+static void draw_scrollbar(int scroll, int count, int vis) {
+    draw_scrollbar_units(scroll, count, vis, ROW_H);
+}
+
+static void draw_more_hint(int scroll, int count, int vis) {
+    if (count <= vis) return;
+    const char *hint = scroll <= 0 ? "Mais abaixo v" : (scroll + vis >= count ? "^ Mais acima" : "^ Mais  v");
+    int tw = 0, th = 0;
+    SDL_Texture *t = text_make(gRen, hint, COL_HEAD, 0, &tw, &th);
+    if (!t) return;
+    int x = LW() - tw - 24;
+    int y = LH() - FOOTER_H - th - 8;
+    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 205);
+    SDL_Rect bg = { x - 10, y - 6, tw + 20, th + 12 };
+    SDL_RenderFillRect(gRen, &bg);
+    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 130);
+    SDL_RenderDrawRect(gRen, &bg);
+    SDL_Rect d = { x, y, tw, th };
+    SDL_RenderCopy(gRen, t, NULL, &d);
+    SDL_DestroyTexture(t);
+}
+
+static void draw_series_help(int shownStart, int shownEnd, int total) {
+    char line[220];
+    if (shownStart < 1) shownStart = 1;
+    if (shownEnd < shownStart) shownEnd = shownStart;
+    snprintf(line, sizeof(line), "A Abrir   B Continuar   X %s   Y Area   L/R Paginas   ZL/ZR Girar",
+             catViewMode ? "Capas" : "Lista");
+    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 218);
+    SDL_Rect box = { 18, LH() - FOOTER_H - 38, LW() - 36, 32 };
+    SDL_RenderFillRect(gRen, &box);
+    SDL_SetRenderDrawColor(gRen, 52, 67, 92, 220);
+    SDL_RenderDrawRect(gRen, &box);
+    text_draw(gRen, line, box.x + 12, box.y + 7, COL_SOFT, 0);
+
+    snprintf(line, sizeof(line), "%d-%d de %d", shownStart, shownEnd, total);
+    int tw = 0, th = 0;
+    SDL_Texture *t = text_make(gRen, line, COL_HEAD, 0, &tw, &th);
+    if (!t) return;
+    SDL_Rect badge = { LW() - tw - 28, TB + 8, tw + 18, th + 12 };
+    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 210);
+    SDL_RenderFillRect(gRen, &badge);
+    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 150);
+    SDL_RenderDrawRect(gRen, &badge);
+    SDL_Rect d = { badge.x + 9, badge.y + 6, tw, th };
+    SDL_RenderCopy(gRen, t, NULL, &d);
+    SDL_DestroyTexture(t);
+}
+
+static void draw_selected_card_focus(int x, int y, int w, int h) {
+    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 42);
+    SDL_Rect glow = { x - 8, y - 8, w + 16, h + 54 };
+    SDL_RenderFillRect(gRen, &glow);
+    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 255);
+    for (int i = 0; i < 4; i++) {
+        SDL_Rect b = { x - 4 - i, y - 4 - i, w + 8 + i * 2, h + 8 + i * 2 };
+        SDL_RenderDrawRect(gRen, &b);
+    }
+    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 224);
+    SDL_Rect chip = { x + 10, y + h - 36, 92, 28 };
+    SDL_RenderFillRect(gRen, &chip);
+    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 190);
+    SDL_RenderDrawRect(gRen, &chip);
+    text_draw(gRen, "A Abrir", chip.x + 12, chip.y + 5, COL_HEAD, 0);
 }
 
 // ---------------- rede ----------------
@@ -803,6 +871,34 @@ static void load_catalog(void) {
     if (catSel >= catCount) catSel = catCount > 0 ? catCount - 1 : 0;
     if (catSel < 0) catSel = 0;
 }
+
+static void clamp_catalog_scroll_to_selection(void) {
+    if (catViewMode == 0) {
+        int gc = grid_cols();
+        int selRow = gc > 0 ? catSel / gc : 0;
+        int visR = grid_visible_rows();
+        int rows = (catCount + gc - 1) / gc;
+        int maxRow = rows - visR;
+        if (maxRow < 0) maxRow = 0;
+        if (selRow < catScroll) catScroll = selRow;
+        if (selRow >= catScroll + visR) catScroll = selRow - visR + 1;
+        if (catScroll > maxRow) catScroll = maxRow;
+    } else {
+        int vis = visible_rows();
+        int maxs = catCount - vis;
+        if (maxs < 0) maxs = 0;
+        if (catSel < catScroll) catScroll = catSel;
+        if (catSel >= catScroll + vis) catScroll = catSel - vis + 1;
+        if (catScroll > maxs) catScroll = maxs;
+    }
+    if (catScroll < 0) catScroll = 0;
+}
+
+static void toggle_catalog_view(void) {
+    catViewMode = !catViewMode;
+    clamp_catalog_scroll_to_selection();
+}
+
 static void enter_series(int idx) {
     cJSON *s = cat_series_at(idx);
     if (!s) return;
@@ -1044,8 +1140,10 @@ static void render_series(void) {
     g_cover_started_this_frame = 0;
     cover_cache_pump();
     char hd[200];
-    if (g_search[0]) snprintf(hd, sizeof(hd), "%s  busca: %.18s  pag %d/%d", AREAS[areaIdx], g_search, catPage + 1, catTotal);
-    else             snprintf(hd, sizeof(hd), "%s  pag %d/%d", AREAS[areaIdx], catPage + 1, catTotal);
+    int shownStart = catCount > 0 ? catSel + 1 : 0;
+    int shownEnd = shownStart;
+    if (g_search[0]) snprintf(hd, sizeof(hd), "%s  busca: %.18s  pag %d/%d  %s  item %d/%d", AREAS[areaIdx], g_search, catPage + 1, catTotal, catViewMode ? "lista" : "capas", shownStart, catCount);
+    else             snprintf(hd, sizeof(hd), "%s  pag %d/%d  %s  item %d/%d", AREAS[areaIdx], catPage + 1, catTotal, catViewMode ? "lista" : "capas", shownStart, catCount);
     SDL_SetRenderDrawColor(gRen, 16, 20, 31, 245);
     SDL_Rect tbar = { 0, 0, LW(), TB };
     SDL_RenderFillRect(gRen, &tbar);
@@ -1059,10 +1157,11 @@ static void render_series(void) {
 
     if (catCount == 0) {
         draw_empty_state("Nada encontrado", "Tente outra busca ou troque a area.");
-    } else {
+    } else if (catViewMode == 0) {
         int cols = grid_cols(), gap = grid_gap();
         int cardW = grid_card_w(), coverH = grid_cover_h(), cellH = grid_cell_h();
         int visR = grid_visible_rows();
+        int rows = (catCount + cols - 1) / cols;
         for (int r = 0; r < visR; r++) {
             for (int c = 0; c < cols; c++) {
                 int idx = (catScroll + r) * cols + c;
@@ -1071,13 +1170,7 @@ static void render_series(void) {
                 int y = LIST_Y + 4 + r * cellH;
                 cJSON *s = cat_series_at(idx);
                 const char *title = json_str(s, "title", "(sem titulo)");
-                if (idx == catSel) {
-                    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 255);
-                    SDL_Rect b1 = { x - 3, y - 3, cardW + 6, coverH + 6 };
-                    SDL_RenderDrawRect(gRen, &b1);
-                    SDL_Rect b2 = { x - 2, y - 2, cardW + 4, coverH + 4 };
-                    SDL_RenderDrawRect(gRen, &b2);
-                }
+                if (idx == catSel) draw_selected_card_focus(x, y, cardW, coverH);
                 SDL_Texture *cover = series_cover_texture(s);
                 if (cover) draw_cover_texture(cover, x, y, cardW, coverH);
                 else       draw_cover_placeholder(x, y, cardW, coverH, title);
@@ -1086,9 +1179,35 @@ static void render_series(void) {
                 text_draw(gRen, t, x, y + coverH + 5, idx == catSel ? COL_SEL : COL_SOFT, 0);
             }
         }
+        shownStart = catScroll * cols + 1;
+        shownEnd = (catScroll + visR) * cols;
+        if (shownEnd > catCount) shownEnd = catCount;
+        draw_scrollbar_units(catScroll, rows, visR, cellH);
+        draw_more_hint(catScroll, rows, visR);
+    } else {
+        int vis = visible_rows();
+        for (int i = 0; i < vis; i++) {
+            int idx = catScroll + i;
+            if (idx >= catCount) break;
+            int y = LIST_Y + i * ROW_H;
+            cJSON *s = cat_series_at(idx);
+            const char *title = json_str(s, "title", "(sem titulo)");
+            draw_row_shell(y, idx == catSel);
+            char row[320], meta[160];
+            snprintf(row, sizeof(row), "%.46s", title);
+            snprintf(meta, sizeof(meta), "%s  item %d de %d  .  A abre capitulos", AREAS[areaIdx], idx + 1, catCount);
+            text_draw(gRen, row, 24, y + 8, idx == catSel ? COL_SEL : COL_TEXT, 0);
+            text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
+        }
+        shownStart = catScroll + 1;
+        shownEnd = catScroll + vis;
+        if (shownEnd > catCount) shownEnd = catCount;
+        draw_scrollbar(catScroll, catCount, vis);
+        draw_more_hint(catScroll, catCount, vis);
     }
     draw_footer(NULL);
-    btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search()); btn_draw(btn_next());
+    if (catCount > 0) draw_series_help(shownStart, shownEnd, catCount);
+    btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search()); btn_draw(btn_view_mode()); btn_draw(btn_next());
 }
 
 static void render_chapters(void) {
@@ -1220,13 +1339,14 @@ static void handle_tap(int lx, int ly) {
         if (btn_hit(btn_prev(), lx, ly)) { if (catPage > 0) { catPage--; catSel = 0; load_catalog(); } return; }
         if (btn_hit(btn_next(), lx, ly)) { if (catPage < catTotal - 1) { catPage++; catSel = 0; load_catalog(); } return; }
         if (btn_hit(btn_area(), lx, ly)) { areaIdx = (areaIdx + 1) % 3; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); return; }
+        if (btn_hit(btn_view_mode(), lx, ly)) { toggle_catalog_view(); return; }
         if (btn_hit(btn_search(), lx, ly)) {
             char term[96] = {0};
             int rs = prompt_text("Buscar serie (vazio = limpar)", term, sizeof(term), 0);
             if (rs != -1) { snprintf(g_search, sizeof(g_search), "%s", rs == 0 ? term : ""); catPage = 0; catSel = 0; load_catalog(); }
             return;
         }
-        {
+        if (catViewMode == 0) {
             int cols = grid_cols(), gap = grid_gap(), cardW = grid_card_w(), cellH = grid_cell_h();
             if (ly >= LIST_Y && ly < LH() - FOOTER_H) {
                 int r = (ly - LIST_Y - 4) / cellH;
@@ -1236,6 +1356,9 @@ static void handle_tap(int lx, int ly) {
                     if (idx >= 0 && idx < catCount) { catSel = idx; enter_series(idx); }
                 }
             }
+        } else if (ly >= LIST_Y && ly < LIST_Y + visible_rows() * ROW_H) {
+            int idx = catScroll + (ly - LIST_Y) / ROW_H;
+            if (idx >= 0 && idx < catCount) { catSel = idx; enter_series(idx); }
         }
     } else if (screen == SC_CHAPTERS) {
         if (btn_hit(btn_back(), lx, ly)) { screen = SC_SERIES; return; }
@@ -1381,7 +1504,7 @@ static void handle_drag(int curLY) {
     if (screen == SC_READER) {
         return;
     }
-    if (screen == SC_SERIES) {   // grade: rola por linhas de cards
+    if (screen == SC_SERIES && catViewMode == 0) {   // grade: rola por linhas de cards
         int cellH = grid_cell_h();
         int cols = grid_cols();
         int maxRow = (catCount + cols - 1) / cols - grid_visible_rows();
@@ -1394,7 +1517,8 @@ static void handle_drag(int curLY) {
         return;
     }
     int *scroll = NULL, count = 0;
-    if (screen == SC_CONTINUE)  { scroll = &contScroll; count = contN; }
+    if (screen == SC_SERIES) { scroll = &catScroll; count = catCount; }
+    else if (screen == SC_CONTINUE)  { scroll = &contScroll; count = contN; }
     else if (screen == SC_CHAPTERS)  { scroll = &chapScroll; count = chapCount; }
     else return;
     dragAccum += (float)(curLY - lastLY);
@@ -1478,27 +1602,22 @@ int main(int argc, char **argv) {
 
                         if (screen == SC_SERIES) {
                             int gc = grid_cols();
-                            if (b == JOY_UP) { if (catSel - gc >= 0) catSel -= gc; }
-                            else if (b == JOY_DOWN) { if (catSel + gc < catCount) catSel += gc; }
-                            else if (b == JOY_DLEFT) { if (catSel > 0) catSel--; }
-                            else if (b == JOY_DRIGHT) { if (catSel < catCount - 1) catSel++; }
+                            if (catViewMode == 0 && b == JOY_UP) { if (catSel - gc >= 0) catSel -= gc; }
+                            else if (catViewMode == 0 && b == JOY_DOWN) { if (catSel + gc < catCount) catSel += gc; }
+                            else if (catViewMode == 0 && b == JOY_DLEFT) { if (catSel > 0) catSel--; }
+                            else if (catViewMode == 0 && b == JOY_DRIGHT) { if (catSel < catCount - 1) catSel++; }
+                            else if (catViewMode == 1 && b == JOY_UP && catSel > 0) catSel--;
+                            else if (catViewMode == 1 && b == JOY_DOWN && catSel < catCount - 1) catSel++;
+                            else if (catViewMode == 1 && b == JOY_DLEFT) { catSel -= visible_rows(); if (catSel < 0) catSel = 0; }
+                            else if (catViewMode == 1 && b == JOY_DRIGHT) { catSel += visible_rows(); if (catSel > catCount - 1) catSel = catCount - 1; }
                             else if (b == JOY_L) { if (catPage > 0) { catPage--; catSel = 0; load_catalog(); } }
                             else if (b == JOY_R) { if (catPage < catTotal - 1) { catPage++; catSel = 0; load_catalog(); } }
                             else if (b == JOY_Y) { areaIdx = (areaIdx + 1) % 3; catPage = 0; catSel = 0; g_search[0] = '\0'; load_catalog(); }
-                            else if (b == JOY_X) {
-                                char term[96] = {0};
-                                int rs = prompt_text("Buscar serie (vazio = limpar)", term, sizeof(term), 0);
-                                if (rs != -1) { snprintf(g_search, sizeof(g_search), "%s", rs == 0 ? term : ""); catPage = 0; catSel = 0; load_catalog(); }
-                            }
+                            else if (b == JOY_X) { toggle_catalog_view(); }
                             else if (b == JOY_MINUS) { store_clear_token(); if (g_token) { free(g_token); g_token = NULL; } if (!authenticate()) { running = 0; break; } catPage = 0; catSel = 0; load_catalog(); }
                             else if (b == JOY_B) { load_continue(); screen = SC_CONTINUE; }
                             else if (b == JOY_A && catCount > 0) enter_series(catSel);
-                            {
-                                int selRow = gc > 0 ? catSel / gc : 0;
-                                int visR = grid_visible_rows();
-                                if (selRow < catScroll) catScroll = selRow;
-                                if (selRow >= catScroll + visR) catScroll = selRow - visR + 1;
-                            }
+                            clamp_catalog_scroll_to_selection();
                         } else if (screen == SC_CHAPTERS) {
                             if (b == JOY_UP && chapSel > 0) chapSel--;
                             else if (b == JOY_DOWN && chapSel < chapCount - 1) chapSel++;
