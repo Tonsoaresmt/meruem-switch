@@ -587,6 +587,7 @@ static int maybe_install_update(void) {
     text_draw(gRen, "Procurando atualizacoes...", 40, 260, COL_SEL, 0);
     text_draw(gRen, "Versao atual: " APP_VERSION_STR, 40, 304, COL_DIM, 0);
     end_frame();
+    SDL_Delay(700);
     rc = update_check(&info);
     if (rc == UPDATE_CHECK_DISABLED || rc == UPDATE_CHECK_UP_TO_DATE) return 0;
     if (rc == UPDATE_CHECK_ERROR) {
@@ -735,6 +736,25 @@ static void reader_goto(int n) {
 }
 
 // ---------------- render ----------------
+static void draw_version_badge(void) {
+    char label[32];
+    int tw = 0, th = 0;
+    Btn rot = btn_rotate();
+    snprintf(label, sizeof(label), "v%s", APP_VERSION_STR);
+    SDL_Texture *t = text_make(gRen, label, COL_DIM, 0, &tw, &th);
+    if (!t) return;
+    int x = rot.x - tw - 14;
+    if (x < 8) x = 8;
+    SDL_SetRenderDrawColor(gRen, 10, 12, 19, 180);
+    SDL_Rect bg = { x - 8, 11, tw + 16, 34 };
+    SDL_RenderFillRect(gRen, &bg);
+    SDL_SetRenderDrawColor(gRen, 54, 70, 96, 220);
+    SDL_RenderDrawRect(gRen, &bg);
+    SDL_Rect d = { x, 11 + (34 - th) / 2, tw, th };
+    SDL_RenderCopy(gRen, t, NULL, &d);
+    SDL_DestroyTexture(t);
+}
+
 static void draw_topbar(const char *title, Btn left) {
     SDL_SetRenderDrawColor(gRen, 16, 20, 31, 245);
     SDL_Rect bar = { 0, 0, LW(), TB };
@@ -743,6 +763,7 @@ static void draw_topbar(const char *title, Btn left) {
     SDL_RenderDrawLine(gRen, 0, TB - 1, LW(), TB - 1);
     btn_draw(left);
     btn_draw(btn_rotate());
+    draw_version_badge();
     if (title) text_draw(gRen, title, left.x + left.w + 16, 12, COL_HEAD, 0);
 }
 
@@ -761,6 +782,7 @@ static void render_series(void) {
     btn_draw(btn_exit());
     btn_draw(btn_continue());
     btn_draw(btn_rotate());
+    draw_version_badge();
     text_draw(gRen, hd, btn_continue().x + btn_continue().w + 12, 12, COL_HEAD, 0);
 
     int vis = visible_rows();
@@ -866,6 +888,7 @@ static void render_reader(void) {
     SDL_RenderFillRect(gRen, &bar);
     btn_draw(btn_back());
     btn_draw(btn_rotate());
+    draw_version_badge();
     char pc[80];
     snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
     text_draw(gRen, pc, btn_back().x + btn_back().w + 16, 12, COL_SEL, 0);
