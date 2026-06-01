@@ -466,8 +466,53 @@ static int prompt_text(const char *guide, char *out, size_t cap, int password) {
     if (R_FAILED(rc)) return -1;
     return out[0] ? 0 : -2;
 }
-// mensagem; A ou toque = continuar(1), + = sair(0)
-static int message_screen(const char *l1, const char *l2) {
+
+static void draw_modal_box(const char *title, const char *l1, const char *l2,
+                           const char *l3, SDL_Color accent, const char *hint) {
+    int w = LW() - 64;
+    int h = 390;
+    int x, y;
+    if (w > 640) w = 640;
+    x = (LW() - w) / 2;
+    y = (LH() - h) / 2 - 24;
+    if (y < 86) y = 86;
+
+    begin_frame();
+    draw_background();
+    SDL_SetRenderDrawColor(gRen, 8, 10, 17, 150);
+    SDL_Rect shade = { 0, 0, LW(), LH() };
+    SDL_RenderFillRect(gRen, &shade);
+
+    SDL_SetRenderDrawColor(gRen, 10, 13, 22, 210);
+    SDL_Rect shadow = { x + 6, y + 8, w, h };
+    SDL_RenderFillRect(gRen, &shadow);
+
+    SDL_SetRenderDrawColor(gRen, 20, 27, 42, 246);
+    SDL_Rect box = { x, y, w, h };
+    SDL_RenderFillRect(gRen, &box);
+    SDL_SetRenderDrawColor(gRen, accent.r, accent.g, accent.b, 255);
+    SDL_RenderDrawRect(gRen, &box);
+    SDL_Rect stripe = { x, y, w, 7 };
+    SDL_RenderFillRect(gRen, &stripe);
+
+    text_draw(gRen, title ? title : "Meruem", x + 28, y + 34, COL_HEAD, 1);
+    if (l1) text_draw(gRen, l1, x + 28, y + 110, COL_SEL, 0);
+    if (l2) text_draw(gRen, l2, x + 28, y + 154, COL_SOFT, 0);
+    if (l3) text_draw(gRen, l3, x + 28, y + 204, COL_TEXT, 0);
+    if (hint) {
+        SDL_SetRenderDrawColor(gRen, 12, 16, 27, 220);
+        SDL_Rect hint_box = { x + 20, y + h - 74, w - 40, 46 };
+        SDL_RenderFillRect(gRen, &hint_box);
+        SDL_SetRenderDrawColor(gRen, 50, 64, 90, 255);
+        SDL_RenderDrawRect(gRen, &hint_box);
+        text_draw(gRen, hint, hint_box.x + 16, hint_box.y + 11, COL_DIM, 0);
+    }
+    end_frame();
+}
+
+static int modal_wait_loop(const char *title, const char *l1, const char *l2,
+                           const char *l3, SDL_Color accent, const char *hint,
+                           int allow_cancel) {
     SDL_Event e;
     Uint32 shown_at = SDL_GetTicks();
     while (appletMainLoop()) {
@@ -477,49 +522,30 @@ static int message_screen(const char *l1, const char *l2) {
             if (!input_ready) continue;
             if (e.type == SDL_FINGERUP) return 1;
             if (e.type == SDL_JOYBUTTONDOWN) {
-                if (e.jbutton.button == JOY_PLUS) return 0;
+                if (allow_cancel && (e.jbutton.button == JOY_PLUS || e.jbutton.button == JOY_B)) return 0;
+                if (!allow_cancel && e.jbutton.button == JOY_PLUS) return 0;
                 if (e.jbutton.button == JOY_A) return 1;
             }
         }
-        begin_frame();
-        SDL_SetRenderDrawColor(gRen, 40, 14, 14, 255);
-        SDL_RenderClear(gRen);
-        text_draw(gRen, "Meruem", 40, 200, COL_HEAD, 1);
-        if (l1) text_draw(gRen, l1, 40, 260, COL_SEL, 0);
-        if (l2) text_draw(gRen, l2, 40, 300, COL_DIM, 0);
-        text_draw(gRen, "Toque ou A = continuar    + = sair", 40, 360, COL_DIM, 0);
-        end_frame();
+        draw_modal_box(title, l1, l2, l3, accent, hint);
         SDL_Delay(16);
     }
     return 0;
 }
+
+// mensagem; A ou toque = continuar(1), + = sair(0)
+static int message_screen(const char *l1, const char *l2) {
+    SDL_Color red = { 220, 72, 72, 255 };
+    return modal_wait_loop("Meruem", l1, l2, NULL, red, "Toque ou A = continuar    + = sair", 0);
+}
+static int success_screen(const char *l1, const char *l2) {
+    SDL_Color green = { 78, 190, 132, 255 };
+    return modal_wait_loop("Meruem", l1, l2, NULL, green, "Toque ou A = continuar", 0);
+}
 // A/toque = sim; B/+ = nao
 static int confirm_screen(const char *l1, const char *l2, const char *l3) {
-    SDL_Event e;
-    Uint32 shown_at = SDL_GetTicks();
-    while (appletMainLoop()) {
-        while (SDL_PollEvent(&e)) {
-            int input_ready = (SDL_GetTicks() - shown_at) > 650;
-            if (e.type == SDL_QUIT) return 0;
-            if (!input_ready) continue;
-            if (e.type == SDL_FINGERUP) return 1;
-            if (e.type == SDL_JOYBUTTONDOWN) {
-                if (e.jbutton.button == JOY_PLUS || e.jbutton.button == JOY_B) return 0;
-                if (e.jbutton.button == JOY_A) return 1;
-            }
-        }
-        begin_frame();
-        SDL_SetRenderDrawColor(gRen, 16, 20, 32, 255);
-        SDL_RenderClear(gRen);
-        text_draw(gRen, "Meruem", 40, 180, COL_HEAD, 1);
-        if (l1) text_draw(gRen, l1, 40, 250, COL_SEL, 0);
-        if (l2) text_draw(gRen, l2, 40, 290, COL_DIM, 0);
-        if (l3) text_draw(gRen, l3, 40, 350, COL_TEXT, 0);
-        text_draw(gRen, "A ou toque = atualizar    B/+ = depois", 40, 410, COL_DIM, 0);
-        end_frame();
-        SDL_Delay(16);
-    }
-    return 0;
+    SDL_Color gold = { 238, 187, 92, 255 };
+    return modal_wait_loop("Atualizacao Meruem", l1, l2, l3, gold, "A/toque = atualizar    B/+ = depois", 1);
 }
 
 static int login_intro_screen(void) {
@@ -602,12 +628,11 @@ static int maybe_install_update(void) {
     int rc;
 
     present_color(20, 20, 40);
-    begin_frame();
-    draw_background();
-    text_draw(gRen, "Meruem", 40, 190, COL_HEAD, 1);
-    text_draw(gRen, "Procurando atualizacoes...", 40, 260, COL_SEL, 0);
-    text_draw(gRen, "Versao atual: " APP_VERSION_STR, 40, 304, COL_DIM, 0);
-    end_frame();
+    {
+        SDL_Color blue = { 96, 154, 232, 255 };
+        draw_modal_box("Atualizacao Meruem", "Procurando atualizacoes...",
+                       "Versao atual: " APP_VERSION_STR, "Consultando GitHub Releases", blue, NULL);
+    }
     SDL_Delay(700);
     rc = update_check(&info);
     write_update_log(rc, &info);
@@ -628,7 +653,7 @@ static int maybe_install_update(void) {
         return 0;
     }
 
-    message_screen("Atualizacao instalada com sucesso.", "Feche o app e abra novamente.");
+    success_screen("Atualizacao instalada com sucesso.", "Feche o app e abra novamente.");
     return 1;
 }
 
