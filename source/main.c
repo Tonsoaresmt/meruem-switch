@@ -28,10 +28,11 @@
 
 #define TB        58       // altura da barra de topo
 #define LIST_Y    76
-#define ROW_H     58
+#define ROW_H     74
 #define FOOTER_H  58
 #define PAGE_SIZE 40
 #define TAP_THRESH 24      // movimento (px logicos) abaixo disso = toque, acima = arrasto
+#define COVER_CACHE_MAX 48
 
 #define JOY_A      0
 #define JOY_B      1
@@ -81,6 +82,15 @@ static char curBookId[96] = {0};
 static int pageCount = 1, curPage = 1;
 static SDL_Texture *pageTex = NULL;
 static char g_self_path[512] = {0};
+
+typedef struct {
+    char id[96];
+    SDL_Texture *tex;
+    int failed;
+} CoverCacheEntry;
+
+static CoverCacheEntry g_cover_cache[COVER_CACHE_MAX];
+static int g_cover_loaded_this_frame = 0;
 
 // estado do toque
 static int  fingerDown = 0;
@@ -239,6 +249,39 @@ static void draw_row_shell(int y, int selected) {
     }
 }
 
+static void draw_cover_placeholder(int x, int y, int w, int h, const char *title) {
+    SDL_SetRenderDrawColor(gRen, 31, 38, 54, 255);
+    SDL_Rect r = { x, y, w, h };
+    SDL_RenderFillRect(gRen, &r);
+    SDL_SetRenderDrawColor(gRen, 79, 96, 125, 255);
+    SDL_RenderDrawRect(gRen, &r);
+    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 160);
+    SDL_Rect mark = { x + w / 2 - 9, y + h / 2 - 13, 18, 26 };
+    SDL_RenderDrawRect(gRen, &mark);
+    if (title && title[0]) {
+        char letter[2] = { title[0], 0 };
+        text_draw(gRen, letter, x + 8, y + h - 28, COL_DIM, 0);
+    }
+}
+
+static void draw_cover_texture(SDL_Texture *tex, int x, int y, int w, int h) {
+    int tw = 0, th = 0;
+    SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
+    if (tw <= 0 || th <= 0) return;
+    float scale = (float)w / tw;
+    float sh = (float)h / th;
+    if (sh > scale) scale = sh;
+    int sw = (int)(w / scale);
+    int sheight = (int)(h / scale);
+    if (sw > tw) sw = tw;
+    if (sheight > th) sheight = th;
+    SDL_Rect src = { (tw - sw) / 2, (th - sheight) / 2, sw, sheight };
+    SDL_Rect dst = { x, y, w, h };
+    SDL_RenderCopy(gRen, tex, &src, &dst);
+    SDL_SetRenderDrawColor(gRen, 250, 215, 120, 90);
+    SDL_RenderDrawRect(gRen, &dst);
+}
+
 static void draw_scrollbar(int scroll, int count, int vis) {
     if (count <= vis) return;
     int trackH = vis * ROW_H - 8;
@@ -307,6 +350,58 @@ static SDL_Texture *load_page(const char *baseUrl, int page) {
     }
     membuf_free(&buf);
     return tex;
+}
+
+static void cover_cache_clear(void) {
+    for (int i = 0; i < COVER_CACHE_MAX; i++) {
+        if (g_cover_cache[i].tex) SDL_DestroyTexture(g_cover_cache[i].tex);
+        g_cover_cache[i].tex = NULL;
+        g_cover_cache[i].failed = 0;
+        g_cover_cache[i].id[0] = '\0';
+    }
+}
+
+static SDL_Texture *load_image_url(const char *url) {
+    struct membuf buf = {0};
+    SDL_Texture *tex = NULL;
+    long code = net_request(url, "GET", NULL, g_token, &buf, NULL);
+    if (code == 200 && buf.data && buf.len > 0) {
+        SDL_RWops *rw = SDL_RWFromConstMem(buf.data, (int)buf.len);
+        SDL_Surface *surf = IMG_Load_RW(rw, 1);
+        if (surf) {
+            tex = SDL_CreateTextureFromSurface(gRen, surf);
+            if (tex) SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+            SDL_FreeSurface(surf);
+        }
+    }
+    membuf_free(&buf);
+    return tex;
+}
+
+static SDL_Texture *series_cover_texture(cJSON *series) {
+    const char *id = json_str(series, "id", "");
+    const char *cover = json_str(series, "cover", "");
+    int empty = -1;
+    if (!id[0] || !cover[0]) return NULL;
+    for (int i = 0; i < COVER_CACHE_MAX; i++) {
+        if (g_cover_cache[i].id[0] && strcmp(g_cover_cache[i].id, id) == 0) {
+            if (g_cover_cache[i].failed) return NULL;
+            return g_cover_cache[i].tex;
+        }
+        if (empty < 0 && !g_cover_cache[i].id[0]) empty = i;
+    }
+    if (empty < 0 || g_cover_loaded_this_frame) return NULL;
+    g_cover_loaded_this_frame = 1;
+    snprintf(g_cover_cache[empty].id, sizeof(g_cover_cache[empty].id), "%s", id);
+    char url[640];
+    if (strncmp(cover, "http://", 7) == 0 || strncmp(cover, "https://", 8) == 0) {
+        snprintf(url, sizeof(url), "%s", cover);
+    } else {
+        snprintf(url, sizeof(url), "%s%s", g_server, cover);
+    }
+    g_cover_cache[empty].tex = load_image_url(url);
+    g_cover_cache[empty].failed = g_cover_cache[empty].tex ? 0 : 1;
+    return g_cover_cache[empty].tex;
 }
 
 // ---------------- teclado / login ----------------
@@ -448,6 +543,7 @@ static int configure_server(void) {
 static void load_catalog(void) {
     present_color(20, 20, 40);
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
+    cover_cache_clear();
     char url[512];
     int n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
                      g_server,
@@ -561,6 +657,7 @@ static void draw_topbar(const char *title, Btn left) {
 
 static void render_series(void) {
     draw_background();
+    g_cover_loaded_this_frame = 0;
     char hd[200];
     if (g_search[0]) snprintf(hd, sizeof(hd), "%s  busca: %.18s  pag %d/%d", AREAS[areaIdx], g_search, catPage + 1, catTotal);
     else             snprintf(hd, sizeof(hd), "%s  pag %d/%d", AREAS[areaIdx], catPage + 1, catTotal);
@@ -586,8 +683,11 @@ static void render_series(void) {
         char meta[160];
         snprintf(row, sizeof(row), "%s", json_str(s, "title", "(sem titulo)"));
         snprintf(meta, sizeof(meta), "%d livros", json_int(s, "booksCount", 0));
-        text_draw(gRen, row, 24, y + 8, idx == catSel ? COL_SEL : COL_TEXT, 0);
-        text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
+        SDL_Texture *cover = series_cover_texture(s);
+        if (cover) draw_cover_texture(cover, 22, y + 7, 42, 60);
+        else       draw_cover_placeholder(22, y + 7, 42, 60, row);
+        text_draw(gRen, row, 78, y + 12, idx == catSel ? COL_SEL : COL_TEXT, 0);
+        text_draw(gRen, meta, 78, y + 42, COL_SOFT, 0);
     }
     draw_scrollbar(catScroll, catCount, vis);
     draw_footer(NULL);
@@ -868,6 +968,7 @@ cleanup:
     if (pageTex) SDL_DestroyTexture(pageTex);
     if (g_ser)   cJSON_Delete(g_ser);
     if (g_cat)   cJSON_Delete(g_cat);
+    cover_cache_clear();
     if (g_token) free(g_token);
     if (curl_ok) net_exit();
     if (net_ok)  socketExit();
