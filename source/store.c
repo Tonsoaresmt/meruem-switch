@@ -14,6 +14,7 @@
 #define SERVER_F DIR_APP "/server.txt"
 #define USER_F   DIR_APP "/user.txt"
 #define SEEN_F   DIR_APP "/update_seen.txt"
+#define LOCAL_F  DIR_APP "/local_root.txt"
 #define PROG_F   DIR_APP "/progress.json"
 #define OFFSER_F DIR_APP "/offline_series.json"
 
@@ -174,6 +175,34 @@ void store_save_update_seen(const char *tag) {
     snprintf(clean, sizeof(clean), "%s", tag);
     trim_line(clean);
     f = fopen(SEEN_F, "wb");
+    if (!f) return;
+    fwrite(clean, 1, strlen(clean), f);
+    fclose(f);
+}
+
+int store_load_local_root(char *out, size_t cap) {
+    FILE *f;
+    size_t n;
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    f = fopen(LOCAL_F, "rb");
+    if (!f) return 0;
+    n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    trim_line(out);
+    if (strcmp(out, "sdmc:") == 0 && cap > 6) snprintf(out, cap, "sdmc:/");
+    return out[0] ? 1 : 0;
+}
+
+void store_save_local_root(const char *path) {
+    FILE *f;
+    char clean[512];
+    if (!path || !path[0]) return;
+    snprintf(clean, sizeof(clean), "%s", path);
+    trim_line(clean);
+    if (strcmp(clean, "sdmc:") == 0) snprintf(clean, sizeof(clean), "sdmc:/");
+    f = fopen(LOCAL_F, "wb");
     if (!f) return;
     fwrite(clean, 1, strlen(clean), f);
     fclose(f);

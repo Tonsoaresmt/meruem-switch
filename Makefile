@@ -14,7 +14,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 APP_TITLE	:=	Meruem
 APP_AUTHOR	:=	Meruem
-APP_VERSION	:=	0.17.0
+APP_VERSION	:=	0.18.1
 UPDATE_REPO_OWNER	?=	Tonsoaresmt
 UPDATE_REPO_NAME	?=	meruem-switch
 
@@ -56,7 +56,7 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= `$(PKGCONF) --libs $(PKGS)` -lnx
+LIBS	:= `$(PKGCONF) --libs $(PKGS)` -lz -lnx
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

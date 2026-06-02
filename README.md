@@ -2,7 +2,8 @@
 
 Meruem Switch e o app homebrew do Meruem para Nintendo Switch. Ele permite ler
 mangas e HQs da plataforma Meruem diretamente no console, com login, favoritos,
-continuar lendo, zoom por toque e atualizacoes pelo proprio app.
+continuar lendo, leitura offline/local, zoom por toque e atualizacoes pelo
+proprio app.
 
 O objetivo e simples: levar a experiencia do Meruem para o Switch de forma
 pratica, leve e acessivel.
@@ -28,9 +29,12 @@ Instalacao resumida:
 2. Copie para o SD em `sdmc:/switch/Meruem/Meruem.nro`.
 3. Abra o Homebrew Menu no Switch.
 4. Inicie o Meruem.
-5. Entre com sua conta Meruem.
+5. Entre com sua conta Meruem para areas online, ou use Offline/Local para ler
+   arquivos ja salvos no SD.
 
 Guia completo: [docs/INSTALL.md](docs/INSTALL.md)
+
+Leitura de arquivos proprios no SD: [docs/LOCAL.md](docs/LOCAL.md)
 
 ## Acesso e Assinatura
 
@@ -54,6 +58,8 @@ caso de duvida, consulte a tela de planos dentro do Meruem.
 - Login com conta Meruem.
 - Favoritos e prateleira sincronizados.
 - Continuar lendo.
+- Area Baixados para capitulos do Meruem salvos no SD.
+- Area Local para CBZ e pastas de imagens do proprio usuario no SD.
 - Modo capas e modo lista.
 - Ordem de capitulos: mais antigos ou mais novos primeiro.
 - Leitura por controle ou touch.
@@ -71,13 +77,16 @@ Suportado:
 
 - CBZ;
 - CBR, quando disponivel como paginas de imagem;
-- mangas e HQs compativeis com leitura por paginas.
+- mangas e HQs compativeis com leitura por paginas;
+- CBZ local direto do SD;
+- pastas locais com imagens `.jpg`, `.jpeg`, `.png`, `.webp` ou `.bmp`.
 
 Nao suportado no app do Switch por enquanto:
 
 - PDF;
 - EPUB;
-- livros de texto.
+- livros de texto;
+- CBR/PDF locais abertos direto do SD.
 
 PDF e EPUB sao filtrados para evitar tela roxa, erro de leitura ou obras que o
 Switch nao consegue abrir corretamente.

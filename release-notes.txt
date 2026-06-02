@@ -1,0 +1,15 @@
+Meruem v0.18.1
+
+Novidades:
+- Local agora le arquivos CBZ direto do SD, alem de pastas com JPG, JPEG, PNG, WEBP e BMP.
+- Pasta padrao simplificada para `sdmc:/Mangas`.
+- O app pula a area Local no ciclo de areas quando a pasta configurada esta vazia.
+- Conta > Leitura local ficou mais curta e sem texto estourando a tela.
+
+Melhorias:
+- Navegacao de pastas ficou mais limpa: sem prefixo repetido "[pasta]" e com "Voltar pasta" no lugar de "Subir".
+- CBZ local usa o mesmo leitor dos mangas online: toque, giro, zoom, cache, loading e progresso.
+- Itens locais removidos do SD deixam de aparecer em "Continuar lendo".
+
+Observacao:
+- CBR/PDF locais ainda ficam para etapa futura.

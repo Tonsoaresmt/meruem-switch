@@ -51,6 +51,18 @@ sdmc:/switch/Meruem/Meruem.nro
 Depois do login, o app carrega catalogo, favoritos, continuar lendo e dados da
 conta.
 
+## Ler Mangas Proprios no SD
+
+Para ler arquivos proprios sem passar pelo servidor Meruem, coloque seus `.cbz`
+ou pastas com imagens em:
+
+```text
+sdmc:/Mangas
+```
+
+No app, abra `Conta`, toque em `Usar padrao` e depois troque a area para
+`Local`. Veja o guia completo em [LOCAL.md](LOCAL.md).
+
 ## Conta Gratuita e Assinatura
 
 O Meruem pode oferecer leitura gratuita com limite diario. Para leitura sem
