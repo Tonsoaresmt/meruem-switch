@@ -11,6 +11,25 @@ pratica, leve e acessivel.
 > O app nao e distribuido pela Nintendo e nao esta na eShop. Ele e um homebrew
 > em formato `.nro` e precisa de um Switch preparado para abrir o Homebrew Menu.
 
+## Demonstracao
+
+<p align="center">
+  <img src="docs/media/hero-tv.gif" width="560" alt="Catalogo do Meruem rodando no modo TV (dock)">
+  <br><sub>Catalogo no modo TV (dock).</sub>
+</p>
+
+<p align="center">
+  <img src="docs/media/shot-catalog.jpg"  width="30%" alt="Catalogo no modo portatil">
+  <img src="docs/media/shot-reader.jpg"   width="30%" alt="Leitor de mangas">
+  <img src="docs/media/shot-chapters.jpg" width="30%" alt="Lista de capitulos">
+  <br><sub>Catalogo (portatil) &middot; leitor &middot; lista de capitulos.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/media/catalog.gif" width="40%" alt="Navegacao pelo catalogo no modo portatil">
+  <br><sub>Navegacao pelo catalogo no modo portatil.</sub>
+</p>
+
 ## Para Usuarios
 
 Baixe a versao mais recente em:
@@ -120,6 +139,11 @@ Se preferir atualizar manualmente, baixe a release mais recente e substitua o
 arquivo no SD.
 
 Mais detalhes: [docs/UPDATES.md](docs/UPDATES.md)
+
+## Changelog
+
+Historico de versoes em [CHANGELOG.md](CHANGELOG.md). A versao mais recente fica
+sempre em [Releases](https://github.com/Tonsoaresmt/meruem-switch/releases/latest).
 
 ## Aviso
 
