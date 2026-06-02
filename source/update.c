@@ -14,6 +14,24 @@ static void copy_text(char *dst, size_t cap, const char *src) {
     snprintf(dst, cap, "%s", src ? src : "");
 }
 
+static void copy_summary(char *dst, size_t cap, const char *src) {
+    size_t j = 0;
+    int last_space = 0;
+    if (!dst || cap == 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+    for (size_t i = 0; src[i] && j + 1 < cap; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+        if (c < 32) continue;
+        if (c == ' ' && last_space) continue;
+        dst[j++] = (char)c;
+        last_space = (c == ' ');
+    }
+    while (j > 0 && dst[j - 1] == ' ') j--;
+    dst[j] = '\0';
+}
+
 static int ends_with_nro(const char *name) {
     size_t len;
     const char *suffix = ".nro";
@@ -204,6 +222,12 @@ int update_check(struct update_info *info) {
             goto done;
         }
         if (info) copy_text(info->latest_version, sizeof(info->latest_version), tag->valuestring);
+        {
+            cJSON *body = cJSON_GetObjectItemCaseSensitive(root, "body");
+            if (info && cJSON_IsString(body) && body->valuestring) {
+                copy_summary(info->release_notes, sizeof(info->release_notes), body->valuestring);
+            }
+        }
         if (version_cmp(tag->valuestring, APP_VERSION_STR) <= 0) {
             if (info) snprintf(info->message, sizeof(info->message), "GitHub latest: %s.", tag->valuestring);
             result = UPDATE_CHECK_UP_TO_DATE;

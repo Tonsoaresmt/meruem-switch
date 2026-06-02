@@ -25,6 +25,7 @@ struct update_info {
     char latest_version[32];
     char asset_name[128];
     char download_url[512];
+    char release_notes[512];
     char message[256];
     long http_code;
 };

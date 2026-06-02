@@ -18,6 +18,11 @@ void store_clear_user(void);
 int  store_load_update_seen(char *out, size_t cap);
 void store_save_update_seen(const char *tag);
 
+// Estado offline de uma serie: 0 = nada, 1 = parcial, 2 = baixada inteira.
+int  store_get_series_offline(const char *seriesId);
+void store_set_series_offline(const char *seriesId, int state);
+void store_clear_series_offline_all(void);
+
 // pagina salva de um capitulo (>=1) ou 1 se nao houver.
 int  store_get_progress(const char *bookId);
 

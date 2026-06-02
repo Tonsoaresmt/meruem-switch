@@ -15,8 +15,10 @@
 #define USER_F   DIR_APP "/user.txt"
 #define SEEN_F   DIR_APP "/update_seen.txt"
 #define PROG_F   DIR_APP "/progress.json"
+#define OFFSER_F DIR_APP "/offline_series.json"
 
 static cJSON *g_prog = NULL;
+static cJSON *g_offser = NULL;   // { seriesId: estado offline 0/1/2 }
 
 void store_init(void) {
     mkdir(DIR_BASE, 0777);
@@ -31,6 +33,41 @@ void store_init(void) {
         fclose(f);
     }
     if (!g_prog) g_prog = cJSON_CreateObject();
+
+    FILE *fo = fopen(OFFSER_F, "rb");
+    if (fo) {
+        fseek(fo, 0, SEEK_END); long n2 = ftell(fo); fseek(fo, 0, SEEK_SET);
+        if (n2 > 0 && n2 < 4 * 1024 * 1024) {
+            char *b2 = (char *)malloc((size_t)n2 + 1);
+            if (b2) { size_t rd = fread(b2, 1, (size_t)n2, fo); b2[rd] = '\0'; g_offser = cJSON_Parse(b2); free(b2); }
+        }
+        fclose(fo);
+    }
+    if (!g_offser) g_offser = cJSON_CreateObject();
+}
+
+int store_get_series_offline(const char *seriesId) {
+    if (!g_offser || !seriesId || !seriesId[0]) return 0;
+    cJSON *it = cJSON_GetObjectItemCaseSensitive(g_offser, seriesId);
+    return cJSON_IsNumber(it) ? it->valueint : 0;
+}
+
+void store_set_series_offline(const char *seriesId, int state) {
+    if (!g_offser || !seriesId || !seriesId[0]) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(g_offser, seriesId);
+    if (state > 0) cJSON_AddNumberToObject(g_offser, seriesId, state);
+    char *s = cJSON_PrintUnformatted(g_offser);
+    if (s) {
+        FILE *f = fopen(OFFSER_F, "wb");
+        if (f) { fwrite(s, 1, strlen(s), f); fclose(f); }
+        free(s);
+    }
+}
+
+void store_clear_series_offline_all(void) {
+    if (g_offser) cJSON_Delete(g_offser);
+    g_offser = cJSON_CreateObject();
+    remove(OFFSER_F);
 }
 
 int store_load_token(char *out, size_t cap) {
