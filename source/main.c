@@ -457,7 +457,7 @@ static char *login_request(const char *user, const char *pass) {
     struct membuf resp = {0};
     char url[512];
     snprintf(url, sizeof(url), "%s/auth/login", g_server);
-    long code = net_request(url, "POST", body, NULL, &resp, NULL);
+    long code = net_request_timeout(url, "POST", body, NULL, &resp, NULL, 8L, 20L);
     free(body);
     char *token = NULL;
     if (code == 200 && resp.data) {
@@ -471,13 +471,16 @@ static char *login_request(const char *user, const char *pass) {
     membuf_free(&resp);
     return token;
 }
-static int token_is_valid(const char *token) {
+// Retorna 1 = ok, 0 = token recusado, -1 = servidor/rede indisponivel.
+static int token_status(const char *token) {
     struct membuf r = {0};
     char url[512];
     snprintf(url, sizeof(url), "%s/switch/ping", g_server);
     long c = net_request_timeout(url, "GET", NULL, token, &r, NULL, 4L, 8L);
     membuf_free(&r);
-    return c == 200;
+    if (c == 200) return 1;
+    if (c <= 0 || c >= 500) return -1;
+    return 0;
 }
 
 static int file_exists(const char *path) {
@@ -668,6 +671,17 @@ static SDL_Texture *cover_texture_for_key(const char *id, const char *cover) {
             return g_cover_cache[i].tex;
         }
         if (empty < 0 && !g_cover_cache[i].id[0]) empty = i;
+    }
+    if (empty < 0) {
+        for (int i = 0; i < COVER_CACHE_MAX; i++) {
+            if (!g_cover_cache[i].loading && !g_cover_cache[i].thread) {
+                if (g_cover_cache[i].tex) SDL_DestroyTexture(g_cover_cache[i].tex);
+                free(g_cover_cache[i].data);
+                memset(&g_cover_cache[i], 0, sizeof(g_cover_cache[i]));
+                empty = i;
+                break;
+            }
+        }
     }
     if (empty < 0 || g_cover_started_this_frame) return NULL;
     g_cover_started_this_frame = 1;
@@ -942,15 +956,20 @@ static int authenticate(void) {
     char tok[512];
     if (store_load_token(tok, sizeof(tok))) {
         present_color(20, 20, 40);
-        if (token_is_valid(tok)) {
+        int tok_state = token_status(tok);
+        if (tok_state == 1) {
             g_offline_mode = 0;
             g_token = strdup(tok);
             return 1;
         }
-        g_offline_mode = 1;
-        g_token = strdup(tok);
-        info_screen("Servidor indisponivel.", "Abrindo leituras salvas no modo offline.");
-        return 1;
+        if (tok_state < 0) {
+            g_offline_mode = 1;
+            g_token = strdup(tok);
+            info_screen("Servidor indisponivel.", "Abrindo leituras salvas no modo offline.");
+            return 1;
+        }
+        store_clear_token();
+        message_screen("Sessao expirada.", "Entre novamente com sua conta Meruem.");
     }
     int hasUser = store_load_user(g_username, sizeof(g_username));
     while (appletMainLoop()) {
@@ -971,6 +990,7 @@ static int authenticate(void) {
         present_color(20, 20, 40);
         g_token = login_request(user, pass);
         if (g_token) {
+            g_offline_mode = 0;
             store_save_token(g_token);
             snprintf(g_username, sizeof(g_username), "%s", user);
             store_save_user(g_username);
@@ -1064,7 +1084,6 @@ static int configure_server(void) {
 // ---------------- dados ----------------
 static void load_catalog(void) {
     present_color(20, 20, 40);
-    cover_cache_clear();   // libera as capas da pagina anterior
     catalogFavorites = 0;
     catalogLoadFailed = 0;
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
@@ -1086,7 +1105,7 @@ static void load_catalog(void) {
         snprintf(url + n, sizeof(url) - n, "&search=%s", enc);
     }
     struct membuf r = {0};
-    long code = net_request(url, "GET", NULL, g_token, &r, NULL);
+    long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
     if (code == 200 && r.data) g_cat = cJSON_Parse(r.data);
     membuf_free(&r);
     catCount = 0; catTotal = 1; catScroll = 0;
@@ -1100,7 +1119,6 @@ static void load_catalog(void) {
 
 static void load_favorites(void) {
     present_color(20, 20, 40);
-    cover_cache_clear();
     catalogFavorites = 1;
     catalogLoadFailed = 0;
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
@@ -1115,7 +1133,7 @@ static void load_favorites(void) {
     char url[512];
     snprintf(url, sizeof(url), "%s/switch/favorites?size=%d&page=%d", g_server, PAGE_SIZE, catPage);
     struct membuf r = {0};
-    long code = net_request(url, "GET", NULL, g_token, &r, NULL);
+    long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
     if (code == 200 && r.data) g_cat = cJSON_Parse(r.data);
     else catalogLoadFailed = 1;
     membuf_free(&r);
@@ -1237,7 +1255,7 @@ static void enter_series(int idx) {
     char url[512];
     snprintf(url, sizeof(url), "%s/switch/series/%s", g_server, id);
     struct membuf r = {0};
-    long code = net_request(url, "GET", NULL, g_token, &r, NULL);
+    long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
     if (code == 200 && r.data) g_ser = cJSON_Parse(r.data);
     membuf_free(&r);
     chapCount = 0; chapSel = 0; chapScroll = 0;
@@ -1294,7 +1312,7 @@ static void enter_reader_from_record(const char *bookId) {
         char url[512];
         snprintf(url, sizeof(url), "%s/switch/series/%s", g_server, sid);
         struct membuf r = {0};
-        long code = net_request(url, "GET", NULL, g_token, &r, NULL);
+        long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
         if (code == 200 && r.data) g_ser = cJSON_Parse(r.data);
         membuf_free(&r);
         chapCount = 0; chapSel = 0; chapScroll = 0;
@@ -1326,6 +1344,20 @@ static void enter_reader_from_record(const char *bookId) {
 
 static void load_continue(void) {
     contN = store_recent(contIds, 60);
+    if (g_offline_mode) {
+        int out = 0;
+        for (int i = 0; i < contN; i++) {
+            int pages = 1;
+            store_entry(contIds[i], NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, &pages);
+            if (offline_count_pages(contIds[i], pages) <= 0) continue;
+            if (out != i) {
+                memcpy(contIds[out], contIds[i], sizeof(contIds[out]));
+                contIds[out][sizeof(contIds[out]) - 1] = '\0';
+            }
+            out++;
+        }
+        contN = out;
+    }
     if (contSel >= contN) contSel = contN > 0 ? contN - 1 : 0;
     if (contSel < 0) contSel = 0;
     contScroll = 0;
@@ -1505,7 +1537,8 @@ static void render_series(void) {
     btn_draw(btn_rotate());
 
     if (catCount == 0) {
-        if (catalogLoadFailed) draw_empty_state("Favoritos ainda nao conectados", "Atualize o Meruem web para liberar /switch/favorites.");
+        if (g_offline_mode) draw_empty_state("Biblioteca online indisponivel", "Sem internet, use Continuar lendo para abrir o que ja foi salvo.");
+        else if (catalogLoadFailed) draw_empty_state("Favoritos ainda nao conectados", "Atualize o Meruem web para liberar /switch/favorites.");
         else if (catalogFavorites) draw_empty_state("Nenhum favorito ainda", "Favorite obras no site Meruem. Depois elas aparecem aqui no Switch.");
         else draw_empty_state("Nada encontrado", "Tente outra busca ou troque a area.");
     } else if (catViewMode == 0) {
@@ -1781,7 +1814,13 @@ static void handle_tap(int lx, int ly) {
         if (btn_hit(btn_back(), lx, ly)) { screen = g_chapters_back; return; }
         if (btn_hit(btn_chap_order(), lx, ly)) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; return; }
         if (btn_hit(btn_up(), lx, ly))   { chapScroll -= visible_rows(); if (chapScroll < 0) chapScroll = 0; return; }
-        if (btn_hit(btn_down(), lx, ly)) { chapScroll += visible_rows(); if (chapScroll > chapCount - 1) chapScroll = (chapCount > 0 ? chapCount - 1 : 0); return; }
+        if (btn_hit(btn_down(), lx, ly)) {
+            int maxs = chapCount - visible_rows();
+            if (maxs < 0) maxs = 0;
+            chapScroll += visible_rows();
+            if (chapScroll > maxs) chapScroll = maxs;
+            return;
+        }
         if (ly >= LIST_Y && ly < LIST_Y + visible_rows() * ROW_H) {
             int idx = chapScroll + (ly - LIST_Y) / ROW_H;
             if (idx >= 0 && idx < chapCount) { chapSel = idx; enter_reader(idx); }
@@ -1979,7 +2018,7 @@ static void handle_drag(int curLY) {
     dragAccum += (float)(curLY - lastLY);
     while (dragAccum >= ROW_H)  { (*scroll)--; dragAccum -= ROW_H; }
     while (dragAccum <= -ROW_H) { (*scroll)++; dragAccum += ROW_H; }
-    int maxs = count - 1; if (maxs < 0) maxs = 0;
+    int maxs = count - visible_rows(); if (maxs < 0) maxs = 0;
     if (*scroll < 0) *scroll = 0;
     if (*scroll > maxs) *scroll = maxs;
 }
@@ -2014,11 +2053,11 @@ int main(int argc, char **argv) {
     } else {
         curl_ok = 1;
         store_init();
-        if (maybe_install_update()) goto cleanup;
         if (configure_server() && authenticate()) {
+            if (!g_offline_mode && maybe_install_update()) goto cleanup;
             load_catalog();
             load_continue();
-            screen = (contN > 0) ? SC_CONTINUE : SC_SERIES;
+            screen = (g_offline_mode || contN > 0) ? SC_CONTINUE : SC_SERIES;
             int running = 1;
             running_ptr = &running;
             SDL_Event e;
