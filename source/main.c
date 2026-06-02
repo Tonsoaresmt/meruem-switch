@@ -346,6 +346,45 @@ static void screen_to_logical(float nx, float ny, int *lx, int *ly) {
     else                   { *lx = 720 - py;   *ly = px;        }
 }
 
+static void render_copy_clipped(SDL_Texture *tex, const SDL_Rect *dst, int maxW) {
+    if (!tex || !dst || maxW <= 0) return;
+    if (dst->w > maxW) {
+        SDL_Rect clip = { dst->x, dst->y - 2, maxW, dst->h + 4 };
+        SDL_RenderSetClipRect(gRen, &clip);
+        SDL_RenderCopy(gRen, tex, NULL, dst);
+        SDL_RenderSetClipRect(gRen, NULL);
+    } else {
+        SDL_RenderCopy(gRen, tex, NULL, dst);
+    }
+}
+
+static int text_draw_fit(SDL_Renderer *ren, const char *utf8, int x, int y,
+                         int maxW, SDL_Color color, int big) {
+    int w = 0, h = 0;
+    if (maxW <= 0) return 0;
+    SDL_Texture *t = text_cached(ren, utf8, color, big, &w, &h);
+    if (!t) return 0;
+    if (w <= maxW) {
+        SDL_Rect dst = { x, y, w, h };
+        SDL_RenderCopy(gRen, t, NULL, &dst);
+        return w;
+    }
+    // Nao cabe: corta reservando espaco e desenha "..." no fim.
+    int ew = 0, eh = 0;
+    SDL_Texture *ell = text_cached(ren, "...", color, big, &ew, &eh);
+    int clipW = maxW - ew;
+    if (!ell || clipW < 10) {                 // estreito demais: so clipa
+        SDL_Rect dst = { x, y, w, h };
+        render_copy_clipped(t, &dst, maxW);
+        return maxW;
+    }
+    SDL_Rect dst = { x, y, w, h };
+    render_copy_clipped(t, &dst, clipW);
+    SDL_Rect edst = { x + clipW, y, ew, eh };
+    SDL_RenderCopy(gRen, ell, NULL, &edst);
+    return maxW;
+}
+
 // ---------------- desenho de botoes ----------------
 static void btn_draw(Btn b) {
     SDL_SetRenderDrawColor(gRen, 12, 16, 26, 160);
@@ -359,8 +398,10 @@ static void btn_draw(Btn b) {
     int tw = 0, th = 0;
     SDL_Texture *t = text_cached(gRen, b.label, COL_SEL, 0, &tw, &th);
     if (t) {
-        SDL_Rect d = { b.x + (b.w - tw) / 2, b.y + (b.h - th) / 2, tw, th };
-        SDL_RenderCopy(gRen, t, NULL, &d);
+        int maxW = b.w - 14;
+        int dx = tw <= maxW ? b.x + (b.w - tw) / 2 : b.x + 7;
+        SDL_Rect d = { dx, b.y + (b.h - th) / 2, tw, th };
+        render_copy_clipped(t, &d, maxW);
     }
 }
 static int btn_hit(Btn b, int lx, int ly) {
@@ -459,7 +500,7 @@ static void draw_footer(const char *hint) {
     SDL_RenderFillRect(gRen, &r);
     SDL_SetRenderDrawColor(gRen, 52, 67, 92, 255);
     SDL_RenderDrawLine(gRen, 0, r.y, LW(), r.y);
-    if (hint) text_draw(gRen, hint, 18, LH() - 41, COL_DIM, 0);
+    if (hint) text_draw_fit(gRen, hint, 18, LH() - 41, LW() - 36, COL_DIM, 0);
 }
 
 static void draw_empty_state(const char *title, const char *subtitle) {
@@ -468,8 +509,8 @@ static void draw_empty_state(const char *title, const char *subtitle) {
     SDL_RenderFillRect(gRen, &box);
     SDL_SetRenderDrawColor(gRen, 68, 84, 112, 255);
     SDL_RenderDrawRect(gRen, &box);
-    if (title) text_draw(gRen, title, box.x + 24, box.y + 32, COL_SEL, 1);
-    if (subtitle) text_draw(gRen, subtitle, box.x + 24, box.y + 88, COL_DIM, 0);
+    if (title) text_draw_fit(gRen, title, box.x + 24, box.y + 32, box.w - 48, COL_SEL, 1);
+    if (subtitle) text_draw_fit(gRen, subtitle, box.x + 24, box.y + 88, box.w - 48, COL_DIM, 0);
 }
 
 static void draw_row_shell(int y, int selected) {
@@ -914,6 +955,22 @@ static const char *path_basename(const char *path) {
     if (!path || !path[0]) return "";
     s = strrchr(path, '/');
     return s && s[1] ? s + 1 : path;
+}
+
+// Mostra o FIM do caminho: ".../penultima/ultima" (ou o caminho todo se curto).
+static void path_short(const char *path, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    if (!path || !path[0]) { out[0] = '\0'; return; }
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;     // ignora barra final
+    int slashes = 0;
+    size_t i = len;
+    while (i > 0) {
+        i--;
+        if (path[i] == '/' && ++slashes == 2) break;
+    }
+    if (slashes == 2 && i > 0) snprintf(out, cap, "...%.*s", (int)(len - i), path + i);
+    else                       snprintf(out, cap, "%.*s", (int)len, path);
 }
 
 static void path_parent(const char *path, char *out, size_t cap) {
@@ -1873,17 +1930,17 @@ static void draw_modal_box(const char *title, const char *l1, const char *l2,
     SDL_Rect stripe = { x, y, w, 7 };
     SDL_RenderFillRect(gRen, &stripe);
 
-    text_draw(gRen, title ? title : "Meruem", x + 28, y + 34, COL_HEAD, 1);
-    if (l1) text_draw(gRen, l1, x + 28, y + 110, COL_SEL, 0);
-    if (l2) text_draw(gRen, l2, x + 28, y + 154, COL_SOFT, 0);
-    if (l3) text_draw(gRen, l3, x + 28, y + 204, COL_TEXT, 0);
+    text_draw_fit(gRen, title ? title : "Meruem", x + 28, y + 34, w - 56, COL_HEAD, 1);
+    if (l1) text_draw_fit(gRen, l1, x + 28, y + 110, w - 56, COL_SEL, 0);
+    if (l2) text_draw_fit(gRen, l2, x + 28, y + 154, w - 56, COL_SOFT, 0);
+    if (l3) text_draw_fit(gRen, l3, x + 28, y + 204, w - 56, COL_TEXT, 0);
     if (hint) {
         SDL_SetRenderDrawColor(gRen, 12, 16, 27, 220);
         SDL_Rect hint_box = { x + 20, y + h - 74, w - 40, 46 };
         SDL_RenderFillRect(gRen, &hint_box);
         SDL_SetRenderDrawColor(gRen, 50, 64, 90, 255);
         SDL_RenderDrawRect(gRen, &hint_box);
-        text_draw(gRen, hint, hint_box.x + 16, hint_box.y + 11, COL_DIM, 0);
+        text_draw_fit(gRen, hint, hint_box.x + 16, hint_box.y + 11, hint_box.w - 32, COL_DIM, 0);
     }
     end_frame();
 }
@@ -2233,26 +2290,26 @@ static int login_welcome_screen(int hasUser, const char *user) {
         SDL_Rect stripe = { bx, by, bw, 7 };
         SDL_RenderFillRect(gRen, &stripe);
 
-        text_draw(gRen, "Meruem", bx + 28, by + 30, COL_HEAD, 1);
+        text_draw_fit(gRen, "Meruem", bx + 28, by + 30, bw - 56, COL_HEAD, 1);
         if (hasUser) {
             char line[160];
-            text_draw(gRen, "Bem-vindo de volta!", bx + 28, by + 96, COL_TEXT, 0);
+            text_draw_fit(gRen, "Bem-vindo de volta!", bx + 28, by + 96, bw - 56, COL_TEXT, 0);
             snprintf(line, sizeof(line), "Conta: %s", user);
-            text_draw(gRen, line, bx + 28, by + 140, COL_SEL, 0);
-            text_draw(gRen, "Entrar abre Mangas/HQ. Offline/Local nao precisa de rede.", bx + 28, by + 186, COL_SOFT, 0);
+            text_draw_fit(gRen, line, bx + 28, by + 140, bw - 56, COL_SEL, 0);
+            text_draw_fit(gRen, "Entrar: Mangas/HQ. Offline/Local: sem rede.", bx + 28, by + 186, bw - 56, COL_SOFT, 0);
         } else {
-            text_draw(gRen, "Bem-vindo! Para ler no Switch:", bx + 28, by + 96, COL_TEXT, 0);
-            text_draw(gRen, "1) No celular/PC, crie sua conta em:", bx + 28, by + 142, COL_SOFT, 0);
-            text_draw(gRen, g_server[0] ? g_server : DEFAULT_SERVER, bx + 28, by + 178, COL_SEL, 0);
-            text_draw(gRen, "2) Volte aqui e toque em Entrar.", bx + 28, by + 218, COL_SOFT, 0);
-            text_draw(gRen, "Ou use Offline/Local para arquivos no SD.", bx + 28, by + 260, COL_DIM, 0);
+            text_draw_fit(gRen, "Bem-vindo! Para ler no Switch:", bx + 28, by + 96, bw - 56, COL_TEXT, 0);
+            text_draw_fit(gRen, "1) Crie sua conta no Meruem:", bx + 28, by + 142, bw - 56, COL_SOFT, 0);
+            text_draw_fit(gRen, g_server[0] ? g_server : DEFAULT_SERVER, bx + 28, by + 178, bw - 56, COL_SEL, 0);
+            text_draw_fit(gRen, "2) Volte aqui e toque em Entrar.", bx + 28, by + 218, bw - 56, COL_SOFT, 0);
+            text_draw_fit(gRen, "Offline/Local le arquivos no SD.", bx + 28, by + 260, bw - 56, COL_DIM, 0);
         }
         btn_draw(enter);
         btn_draw(offline);
         if (hasUser) btn_draw(swap);
-        text_draw(gRen, hasUser ? "A: entrar    X: offline/local    Y: trocar conta    B/+: sair"
-                                : "A: entrar    X: offline/local    B/+: sair",
-                  bx + 28, by + bh - 26, COL_DIM, 0);
+        text_draw_fit(gRen, hasUser ? "A entrar  X offline/local  Y trocar  B/+ sair"
+                                    : "A entrar  X offline/local  B/+ sair",
+                      bx + 28, by + bh - 26, bw - 56, COL_DIM, 0);
         end_frame();
         SDL_Delay(16);
     }
@@ -3093,21 +3150,7 @@ static void draw_topbar_reserved(const char *title, Btn left, int rightX) {
     if (title) {
         int maxW = rightX - (left.x + left.w + 24);
         if (maxW < 60) maxW = 60;
-        char trunc[200];
-        snprintf(trunc, sizeof(trunc), "%s", title);
-        // Trunca antes de invadir os botoes da direita.
-        int est = (int)strlen(trunc) * 10;
-        if (est > maxW) {
-            int max = (maxW / 10) - 3;
-            if (max < 1) max = 1;
-            if (max < (int)sizeof(trunc) - 4) {
-                trunc[max] = '.';
-                trunc[max + 1] = '.';
-                trunc[max + 2] = '.';
-                trunc[max + 3] = '\0';
-            }
-        }
-        text_draw(gRen, trunc, left.x + left.w + 16, 12, COL_HEAD, 0);
+        text_draw_fit(gRen, title, left.x + left.w + 16, 12, maxW, COL_HEAD, 0);
     }
 }
 
@@ -3160,7 +3203,7 @@ static void render_series(void) {
                 draw_offline_badge(x + cardW - 52, y + 6, store_get_series_offline(json_str(s, "id", "")));
                 char t[40];
                 snprintf(t, sizeof(t), "%.16s", title);
-                text_draw(gRen, t, x, y + coverH + 5, idx == catSel ? COL_SEL : COL_SOFT, 0);
+                text_draw_fit(gRen, t, x, y + coverH + 5, cardW, idx == catSel ? COL_SEL : COL_SOFT, 0);
             }
         }
         shownStart = catScroll * cols + 1;
@@ -3179,7 +3222,7 @@ static void render_series(void) {
             draw_row_shell(y, idx == catSel);
             char row[320];
             snprintf(row, sizeof(row), "%.48s", title);
-            text_draw(gRen, row, 24, y + 22, idx == catSel ? COL_SEL : COL_TEXT, 0);
+            text_draw_fit(gRen, row, 24, y + 22, LW() - 116, idx == catSel ? COL_SEL : COL_TEXT, 0);
             draw_offline_badge(LW() - 74, y + 16, store_get_series_offline(json_str(s, "id", "")));
         }
         shownStart = catScroll + 1;
@@ -3202,43 +3245,43 @@ static void render_settings(void) {
     SDL_SetRenderDrawColor(gRen, 92, 152, 76, 180);
     SDL_RenderDrawRect(gRen, &box);
 
-    char line[300];
-    text_draw(gRen, "Perfil Meruem", box.x + 24, box.y + 18, COL_HEAD, 1);
+    char line[600];
+    int boxTextW = box.w - 48;
+    text_draw_fit(gRen, "Perfil Meruem", box.x + 24, box.y + 18, boxTextW, COL_HEAD, 1);
     snprintf(line, sizeof(line), "Conta logada: %s", g_username[0] ? g_username : "(nao identificada)");
-    text_draw(gRen, line, box.x + 24, box.y + 62, COL_SEL, 0);
-    snprintf(line, sizeof(line), "Servidor: %.34s", g_server[0] ? g_server : DEFAULT_SERVER);
-    text_draw(gRen, line, box.x + 24, box.y + 96, COL_SOFT, 0);
+    text_draw_fit(gRen, line, box.x + 24, box.y + 62, boxTextW, COL_SEL, 0);
+    snprintf(line, sizeof(line), "Servidor: %s", g_server[0] ? g_server : DEFAULT_SERVER);
+    text_draw_fit(gRen, line, box.x + 24, box.y + 96, boxTextW, COL_SOFT, 0);
     snprintf(line, sizeof(line), "Versao do app: %s", APP_VERSION_STR);
-    text_draw(gRen, line, box.x + 24, box.y + 128, COL_DIM, 0);
-    text_draw(gRen, "Assinatura e limite diario:", box.x + 24, box.y + 166, COL_HEAD, 0);
+    text_draw_fit(gRen, line, box.x + 24, box.y + 128, boxTextW, COL_DIM, 0);
+    text_draw_fit(gRen, "Assinatura e limite diario:", box.x + 24, box.y + 166, boxTextW, COL_HEAD, 0);
     if (profileLoaded) {
         snprintf(line, sizeof(line), "Plano: %s", profileTier[0] ? profileTier : "free");
-        text_draw(gRen, line, box.x + 24, box.y + 204, COL_SEL, 0);
-        snprintf(line, sizeof(line), "%.38s", profileAccess);
-        text_draw(gRen, line, box.x + 24, box.y + 236, COL_SOFT, 0);
-        snprintf(line, sizeof(line), "%.38s", profileChapters);
-        text_draw(gRen, line, box.x + 24, box.y + 268, COL_DIM, 0);
-        snprintf(line, sizeof(line), "%.38s", profileBooks);
-        text_draw(gRen, line, box.x + 24, box.y + 300, COL_DIM, 0);
-        snprintf(line, sizeof(line), "%.38s", profileCounts);
-        text_draw(gRen, line, box.x + 24, box.y + 328, COL_DIM, 0);
+        text_draw_fit(gRen, line, box.x + 24, box.y + 204, boxTextW, COL_SEL, 0);
+        text_draw_fit(gRen, profileAccess, box.x + 24, box.y + 236, boxTextW, COL_SOFT, 0);
+        text_draw_fit(gRen, profileChapters, box.x + 24, box.y + 268, boxTextW, COL_DIM, 0);
+        text_draw_fit(gRen, profileBooks, box.x + 24, box.y + 300, boxTextW, COL_DIM, 0);
+        text_draw_fit(gRen, profileCounts, box.x + 24, box.y + 328, boxTextW, COL_DIM, 0);
     } else if (profileFailed) {
-        text_draw(gRen, "Nao foi possivel sincronizar /switch/me agora.", box.x + 24, box.y + 204, COL_DIM, 0);
-        text_draw(gRen, "Abra esta tela novamente depois.", box.x + 24, box.y + 238, COL_DIM, 0);
+        text_draw_fit(gRen, "Nao foi possivel sincronizar /switch/me agora.", box.x + 24, box.y + 204, boxTextW, COL_DIM, 0);
+        text_draw_fit(gRen, "Abra esta tela novamente depois.", box.x + 24, box.y + 238, boxTextW, COL_DIM, 0);
     } else {
-        text_draw(gRen, "Sincronizando conta com o Meruem web...", box.x + 24, box.y + 204, COL_DIM, 0);
+        text_draw_fit(gRen, "Sincronizando conta com o Meruem web...", box.x + 24, box.y + 204, boxTextW, COL_DIM, 0);
     }
     SDL_Rect localBox = { 28, box.y + box.h + 12, LW() - 56, g_portrait ? 126 : 92 };
     SDL_SetRenderDrawColor(gRen, 22, 30, 46, 232);
     SDL_RenderFillRect(gRen, &localBox);
     SDL_SetRenderDrawColor(gRen, 96, 154, 232, 180);
     SDL_RenderDrawRect(gRen, &localBox);
-    text_draw(gRen, "Leitura local", localBox.x + 24, localBox.y + 18, COL_HEAD, 1);
-    snprintf(line, sizeof(line), "Pasta: %.38s", g_local_root);
-    text_draw(gRen, line, localBox.x + 24, localBox.y + 52, COL_SEL, 0);
+    int localTextW = localBox.w - 48;
+    text_draw_fit(gRen, "Leitura local", localBox.x + 24, localBox.y + 18, localTextW, COL_HEAD, 1);
+    char shortPath[160];
+    path_short(g_local_root, shortPath, sizeof(shortPath));
+    snprintf(line, sizeof(line), "Pasta: %s", shortPath);
+    text_draw_fit(gRen, line, localBox.x + 24, localBox.y + 52, localTextW, COL_SEL, 0);
     if (g_portrait) {
-        text_draw(gRen, "Padrao: sdmc:/Mangas", localBox.x + 24, localBox.y + 82, COL_SOFT, 0);
-        text_draw(gRen, "CBZ ou pastas com imagens.", localBox.x + 24, localBox.y + 106, COL_DIM, 0);
+        text_draw_fit(gRen, "Padrao: sdmc:/Mangas", localBox.x + 24, localBox.y + 82, localTextW, COL_SOFT, 0);
+        text_draw_fit(gRen, "CBZ ou pastas com imagens.", localBox.x + 24, localBox.y + 106, localTextW, COL_DIM, 0);
     }
     btn_draw(btn_switch_account());
     btn_draw(btn_pick_local());
@@ -3273,8 +3316,8 @@ static void render_chapters(void) {
         snprintf(row, sizeof(row), "#%s  %.40s", num, tt[0] ? tt : "Capitulo");
         if (off > 0) snprintf(meta, sizeof(meta), "%d paginas  offline %d/%d%s", pages, off, pages, prog > 1 ? "  em andamento" : "");
         else         snprintf(meta, sizeof(meta), "%d paginas%s", pages, prog > 1 ? "  em andamento" : "");
-        text_draw(gRen, row, 24, y + 8, idx == chapSel ? COL_SEL : COL_TEXT, 0);
-        text_draw(gRen, meta, 24, y + 34, COL_SOFT, 0);
+        text_draw_fit(gRen, row, 24, y + 8, LW() - 56, idx == chapSel ? COL_SEL : COL_TEXT, 0);
+        text_draw_fit(gRen, meta, 24, y + 34, LW() - 56, COL_SOFT, 0);
     }
     draw_scrollbar(chapScroll, chapCount, vis);
     draw_footer(NULL);
@@ -3284,7 +3327,8 @@ static void render_chapters(void) {
         const char *hint = soff == 2 ? "Serie ja baixada (X = rebaixar)   B: voltar"
                          : soff == 1 ? "X = completar download   B: voltar"
                                      : "X = baixar tudo offline   B: voltar";
-        text_draw(gRen, hint, btn_download_all().x + btn_download_all().w + 16, LH() - 41, COL_DIM, 0);
+        text_draw_fit(gRen, hint, btn_download_all().x + btn_download_all().w + 16, LH() - 41,
+                      LW() - (btn_download_all().x + btn_download_all().w + 32), COL_DIM, 0);
     }
     btn_draw(btn_up()); btn_draw(btn_down());
 }
@@ -3324,8 +3368,8 @@ static void render_continue(void) {
         SDL_Texture *cover = cover_texture_for_key(contIds[idx], cv);
         if (cover) draw_cover_texture(cover, 22, y + 7, 42, 60);
         else       draw_cover_placeholder(22, y + 7, 42, 60, st[0] ? st : "?");
-        text_draw(gRen, row, 78, y + 9, idx == contSel ? COL_SEL : COL_TEXT, 0);
-        text_draw(gRen, meta, 78, y + 38, COL_SOFT, 0);
+        text_draw_fit(gRen, row, 78, y + 9, LW() - 100, idx == contSel ? COL_SEL : COL_TEXT, 0);
+        text_draw_fit(gRen, meta, 78, y + 38, LW() - 100, COL_SOFT, 0);
     }
     draw_scrollbar(contScroll, contN, vis);
     draw_footer("A/toque: continuar    X: Baixados    Y: Local    B: acervo    ZL/ZR: girar");
@@ -3358,8 +3402,8 @@ static void render_offline_manager(void) {
         draw_row_shell(y, idx == offlineSel);
         snprintf(row, sizeof(row), "%.34s", st[0] ? st : "(serie)");
         snprintf(meta, sizeof(meta), "%s  offline %d/%d  %s", cl, offlineSaved[idx], pages, size);
-        text_draw(gRen, row, 24, y + 9, idx == offlineSel ? COL_SEL : COL_TEXT, 0);
-        text_draw(gRen, meta, 24, y + 38, COL_SOFT, 0);
+        text_draw_fit(gRen, row, 24, y + 9, LW() - 56, idx == offlineSel ? COL_SEL : COL_TEXT, 0);
+        text_draw_fit(gRen, meta, 24, y + 38, LW() - 56, COL_SOFT, 0);
     }
     draw_scrollbar(offlineScroll, offlineN, vis);
     draw_area_hint_line();
@@ -3367,14 +3411,15 @@ static void render_offline_manager(void) {
     btn_draw(btn_delete_all());
     btn_draw(btn_area());
     btn_draw(btn_search());
-    text_draw(gRen, "A abrir  X apagar  Y tudo  B voltar",
-              btn_search().x + btn_search().w + 16, LH() - 41, COL_DIM, 0);
+    text_draw_fit(gRen, "A abrir  X apagar  Y tudo  B voltar",
+                  btn_search().x + btn_search().w + 16, LH() - 41,
+                  LW() - (btn_search().x + btn_search().w + 32), COL_DIM, 0);
 }
 
 static void draw_area_hint_line(void) {
     char line[180];
     snprintf(line, sizeof(line), "Area atual: %s", current_area_label());
-    text_draw(gRen, line, 18, LH() - FOOTER_H - 26, COL_HEAD, 0);
+    text_draw_fit(gRen, line, 18, LH() - FOOTER_H - 26, LW() - 36, COL_HEAD, 0);
 }
 
 static void render_local_browser(void) {
@@ -3403,17 +3448,18 @@ static void render_local_browser(void) {
         else if (it->cbzCount > 0 && it->dirCount > 0) snprintf(meta, sizeof(meta), "%d CBZ  %d pastas  %s", it->cbzCount, it->dirCount, size);
         else if (it->cbzCount > 0) snprintf(meta, sizeof(meta), "%d CBZ  %s", it->cbzCount, size);
         else snprintf(meta, sizeof(meta), "%d pastas", it->dirCount);
-        text_draw(gRen, row, 24, y + 9, idx == localSel ? COL_SEL : COL_TEXT, 0);
-        text_draw(gRen, meta, 24, y + 38, COL_SOFT, 0);
+        text_draw_fit(gRen, row, 24, y + 9, LW() - 56, idx == localSel ? COL_SEL : COL_TEXT, 0);
+        text_draw_fit(gRen, meta, 24, y + 38, LW() - 56, COL_SOFT, 0);
     }
     draw_scrollbar(localScroll, localN, vis);
     draw_more_hint(localScroll, localN, vis);
-    if (localStatus[0] && localN > 0) text_draw(gRen, localStatus, 18, LH() - FOOTER_H - 50, COL_DIM, 0);
+    if (localStatus[0] && localN > 0) text_draw_fit(gRen, localStatus, 18, LH() - FOOTER_H - 50, LW() - 36, COL_DIM, 0);
     draw_area_hint_line();
     draw_footer(NULL);
     btn_draw(btn_area());
     btn_draw(btn_search());
-    text_draw(gRen, "A ler  Y pasta  X local  B voltar", btn_search().x + btn_search().w + 16, LH() - 41, COL_DIM, 0);
+    text_draw_fit(gRen, "A ler  Y pasta  X local  B voltar", btn_search().x + btn_search().w + 16, LH() - 41,
+                  LW() - (btn_search().x + btn_search().w + 32), COL_DIM, 0);
 }
 
 static void render_local_picker(void) {
@@ -3440,12 +3486,12 @@ static void render_local_picker(void) {
         else if (it->imageCount > 0) snprintf(meta, sizeof(meta), "%d imagens  %d pastas  %s", it->imageCount, it->dirCount, size);
         else if (it->cbzCount > 0) snprintf(meta, sizeof(meta), "%d CBZ  %d pastas  %s", it->cbzCount, it->dirCount, size);
         else snprintf(meta, sizeof(meta), "%d pastas", it->dirCount);
-        text_draw(gRen, row, 24, y + 9, idx == localSel ? COL_SEL : COL_TEXT, 0);
-        text_draw(gRen, meta, 24, y + 38, COL_SOFT, 0);
+        text_draw_fit(gRen, row, 24, y + 9, LW() - 56, idx == localSel ? COL_SEL : COL_TEXT, 0);
+        text_draw_fit(gRen, meta, 24, y + 38, LW() - 56, COL_SOFT, 0);
     }
     draw_scrollbar(localScroll, localN, vis);
     draw_more_hint(localScroll, localN, vis);
-    if (localStatus[0]) text_draw(gRen, localStatus, 18, LH() - FOOTER_H - 50, COL_DIM, 0);
+    if (localStatus[0]) text_draw_fit(gRen, localStatus, 18, LH() - FOOTER_H - 50, LW() - 36, COL_DIM, 0);
     draw_footer("A entrar  X usar esta pasta  B voltar pasta");
     btn_draw(btn_use_folder());
     btn_draw(btn_parent_folder());
@@ -3493,12 +3539,12 @@ static void render_reader(void) {
             snprintf(title, sizeof(title), "Carregando pagina %d/%d%.*s", curPage, pageCount, dots, "...");
             snprintf(line, sizeof(line), "%s", page_cache_current_loading() ? "Preparando a imagem em segundo plano." : "Aguardando vaga no cache de paginas.");
         }
-        text_draw(gRen, title, r.x + 28, r.y + 30, COL_HEAD, 1);
-        text_draw(gRen, line, r.x + 28, r.y + 82, COL_SOFT, 0);
+        text_draw_fit(gRen, title, r.x + 28, r.y + 30, r.w - 56, COL_HEAD, 1);
+        text_draw_fit(gRen, line, r.x + 28, r.y + 82, r.w - 56, COL_SOFT, 0);
         if (waiting && pageTex && pageTexPage > 0) {
             char hint[120];
             snprintf(hint, sizeof(hint), "Mantive a pagina %d na tela enquanto isso.", pageTexPage);
-            text_draw(gRen, hint, r.x + 28, r.y + 118, COL_DIM, 0);
+            text_draw_fit(gRen, hint, r.x + 28, r.y + 118, r.w - 56, COL_DIM, 0);
         }
     }
     int overlay = SDL_GetTicks() < reader_overlay_until;
@@ -3512,15 +3558,15 @@ static void render_reader(void) {
         char pc[160];
         int maxPcW = (g_reader_source == READER_SRC_REMOTE ? btn_offline().x : btn_rotate().x) - (btn_back().x + btn_back().w + 24);
         snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
-        text_draw(gRen, pc, btn_back().x + btn_back().w + 14, 12, COL_SEL, 0);
+        text_draw_fit(gRen, pc, btn_back().x + btn_back().w + 14, 12, maxPcW, COL_SEL, 0);
         (void)maxPcW;
         if (g_reader_source == READER_SRC_REMOTE) {
             int off = offline_count_pages(curBookId, pageCount);
             char st[80];
             snprintf(st, sizeof(st), "X: offline  %d/%d no SD", off, pageCount);
-            text_draw(gRen, st, 18, LH() - 48, off == pageCount ? COL_HEAD : COL_DIM, 0);
+            text_draw_fit(gRen, st, 18, LH() - 48, LW() - 36, off == pageCount ? COL_HEAD : COL_DIM, 0);
         } else {
-            text_draw(gRen, "Local: lendo direto do SD", 18, LH() - 48, COL_DIM, 0);
+            text_draw_fit(gRen, "Local: lendo direto do SD", 18, LH() - 48, LW() - 36, COL_DIM, 0);
         }
     }
     if (next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) {
@@ -3533,10 +3579,10 @@ static void render_reader(void) {
         SDL_RenderDrawRect(gRen, &box);
         char msg[160];
         snprintf(msg, sizeof(msg), "Proximo capitulo em %ds", left);
-        text_draw(gRen, msg, box.x + 32, box.y + 24, COL_HEAD, 1);
+        text_draw_fit(gRen, msg, box.x + 32, box.y + 24, box.w - 64, COL_HEAD, 1);
         cJSON *next = chap_at_real(curChapIndex + 1);
         snprintf(msg, sizeof(msg), "Capitulo #%s", json_str(next, "number", "?"));
-        text_draw(gRen, msg, box.x + 32, box.y + 62, COL_SEL, 0);
+        text_draw_fit(gRen, msg, box.x + 32, box.y + 62, box.w - 64, COL_SEL, 0);
         btn_draw(btn_next_open());
         btn_draw(btn_next_cancel());
     }
