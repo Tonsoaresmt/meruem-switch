@@ -818,14 +818,33 @@ static void rmrf(const char *path) {
 // Reduz uma vez paginas muito grandes para ~1600px no lado maior, via GPU (bilinear).
 // Resultado: menos serrilhado (duas reducoes suaves em vez de uma forte por frame),
 // menos VRAM, e ainda nitido com zoom moderado. Capas (pequenas) passam intactas.
-#define IMG_MAX_SIDE 1600
+#define IMG_MAX_W 1600
+// Teto de altura seguro da GPU (consultado uma vez). Webtoons/manhwa sao tiras altas.
+static int reader_max_tex_h(void) {
+    static int cached = 0;
+    if (cached == 0) {
+        SDL_RendererInfo info;
+        if (SDL_GetRendererInfo(gRen, &info) == 0 && info.max_texture_height > 0)
+            cached = info.max_texture_height;
+        else
+            cached = 16384;            // sem limite informado: usa um teto alto
+        if (cached > 16384) cached = 16384;
+    }
+    return cached;
+}
 static SDL_Texture *downscale_if_huge(SDL_Texture *src) {
     int tw = 0, th = 0;
     if (!src) return src;
     SDL_QueryTexture(src, NULL, NULL, &tw, &th);
-    int longSide = tw > th ? tw : th;
-    if (tw <= 0 || th <= 0 || longSide <= IMG_MAX_SIDE) return src;
-    float s = (float)IMG_MAX_SIDE / (float)longSide;
+    if (tw <= 0 || th <= 0) return src;
+    // Limita LARGURA e ALTURA separadamente: tiras finas e altas mantem a largura
+    // nitida (antes o lado MAIOR ia a 1600 e a largura virava um fiapo borrado).
+    int maxH = reader_max_tex_h();
+    int maxW = IMG_MAX_W < maxH ? IMG_MAX_W : maxH;
+    float s = 1.0f;
+    if (tw > maxW)     s = (float)maxW / (float)tw;
+    if (th * s > maxH) s = (float)maxH / (float)th;
+    if (s >= 0.999f) return src;       // ja cabe e ja esta nitido
     int dw = (int)(tw * s), dh = (int)(th * s);
     if (dw < 1) dw = 1;
     if (dh < 1) dh = 1;
@@ -3021,30 +3040,50 @@ static void reader_reset_touch(void) {
     readerPinchBaseZoom = rd_zoom;
 }
 
+// Tira vertical (webtoon/manhwa): proporcao absoluta bem maior que uma pagina
+// normal de manga/HQ (~1.4-1.6) ou pagina dupla (larga). Independe da orientacao
+// da tela, pra nao classificar manga comum como "tira" no modo TV (deitado).
+#define READER_TALL_RATIO 2.3f
+static int reader_page_is_tall(int tw, int th) {
+    if (tw <= 0 || th <= 0) return 0;
+    return (float)th / (float)tw >= READER_TALL_RATIO;
+}
+// Escala base: "conter" (caber inteira) no caso normal; "preencher largura" nas
+// tiras altas, pra nao ficarem minusculas e exigirem zoom (que borra).
+static float reader_base_scale(int tw, int th) {
+    if (tw <= 0 || th <= 0) return 1.0f;
+    float sw = (float)LW() / (float)tw;
+    if (reader_page_is_tall(tw, th)) return sw;
+    float sh = (float)LH() / (float)th;
+    return sw < sh ? sw : sh;
+}
 static void reader_clamp_pan(void) {
     int tw = 0, th = 0;
     if (!pageTex) { rd_pan_x = rd_pan_y = 0.0f; return; }
     SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
-    if (tw <= 0 || th <= 0 || rd_zoom <= READER_ZOOM_MIN + 0.01f) {
-        rd_pan_x = rd_pan_y = 0.0f;
-        return;
-    }
-    float fit = (float)LW() / tw;
-    float fy = (float)LH() / th;
-    if (fy < fit) fit = fy;
-    float w = tw * fit * rd_zoom;
-    float h = th * fit * rd_zoom;
+    if (tw <= 0 || th <= 0) { rd_pan_x = rd_pan_y = 0.0f; return; }
+    float base = reader_base_scale(tw, th);
+    float w = tw * base * rd_zoom;
+    float h = th * base * rd_zoom;
     float maxX = w > LW() ? (w - LW()) * 0.5f : 0.0f;
     float maxY = h > LH() ? (h - LH()) * 0.5f : 0.0f;
-    if (rd_pan_x < -maxX) rd_pan_x = -maxX;
-    if (rd_pan_x >  maxX) rd_pan_x =  maxX;
-    if (rd_pan_y < -maxY) rd_pan_y = -maxY;
-    if (rd_pan_y >  maxY) rd_pan_y =  maxY;
+    // Rola enquanto o eixo nao couber (vertical funciona mesmo sem zoom = webtoon).
+    if (maxX <= 0.0f) rd_pan_x = 0.0f;
+    else { if (rd_pan_x < -maxX) rd_pan_x = -maxX; if (rd_pan_x > maxX) rd_pan_x = maxX; }
+    if (maxY <= 0.0f) rd_pan_y = 0.0f;
+    else { if (rd_pan_y < -maxY) rd_pan_y = -maxY; if (rd_pan_y > maxY) rd_pan_y = maxY; }
 }
 
 static void reader_reset_view(void) {
     rd_zoom = READER_ZOOM_MIN;
     rd_pan_x = rd_pan_y = 0.0f;
+    // Tiras altas comecam no TOPO (em vez de centralizadas no meio da tira).
+    int tw = 0, th = 0;
+    if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
+    if (reader_page_is_tall(tw, th)) {
+        float h = th * reader_base_scale(tw, th);
+        if (h > LH()) rd_pan_y = (h - (float)LH()) * 0.5f;   // +maxY = topo
+    }
     reader_reset_touch();
     reader_show_overlay();
 }
@@ -3055,9 +3094,7 @@ static void reader_page_rect(SDL_Rect *dst) {
     if (!pageTex) return;
     SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
     if (tw <= 0 || th <= 0) return;
-    float scale = (float)LW() / tw;
-    float sh = (float)LH() / th;
-    if (sh < scale) scale = sh;
+    float scale = reader_base_scale(tw, th);
     int w = (int)(tw * scale * rd_zoom);
     int h = (int)(th * scale * rd_zoom);
     dst->w = w; dst->h = h;
@@ -3101,6 +3138,24 @@ static void reader_open_page(int n, int atBottom) {
 // dir > 0 = avancar; dir < 0 = voltar.
 static void reader_advance(int dir) {
     reader_open_page(curPage + (dir > 0 ? 1 : -1), 0);
+}
+
+// Controle: em tira alta, rola ~uma tela; so vira a pagina ao chegar no fim.
+static void reader_scroll_or_turn(int dir) {
+    int tw = 0, th = 0;
+    if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
+    if (reader_page_is_tall(tw, th) && rd_zoom <= READER_ZOOM_MIN + 0.01f) {
+        float h = th * reader_base_scale(tw, th);
+        float maxY = h > LH() ? (h - (float)LH()) * 0.5f : 0.0f;
+        float step = (float)LH() * 0.82f;
+        if (dir > 0 && rd_pan_y > -maxY + 1.0f) {        // descer na tira
+            rd_pan_y -= step; reader_clamp_pan(); reader_show_overlay(); return;
+        }
+        if (dir < 0 && rd_pan_y <  maxY - 1.0f) {        // subir na tira
+            rd_pan_y += step; reader_clamp_pan(); reader_show_overlay(); return;
+        }
+    }
+    reader_advance(dir);                                  // fim da tira / pagina normal
 }
 
 static void reader_open_next_chapter_now(void) {
@@ -3791,8 +3846,8 @@ static void handle_tap(int lx, int ly) {
             return;
         }
         if (rd_zoom <= READER_ZOOM_MIN + 0.01f) {
-            if (lx < LW() * 34 / 100) { reader_advance(-1); return; }
-            if (lx > LW() * 66 / 100) { reader_advance(1); return; }
+            if (lx < LW() * 34 / 100) { reader_scroll_or_turn(-1); return; }
+            if (lx > LW() * 66 / 100) { reader_scroll_or_turn(1); return; }
         }
         reader_show_overlay();
     }
@@ -3868,10 +3923,15 @@ static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
         return;
     }
 
-    if (reader_touch_count() == 1 && rd_zoom > READER_ZOOM_MIN + 0.01f) {
-        rd_pan_x += dx;
-        rd_pan_y += dy;
-        reader_clamp_pan();
+    if (reader_touch_count() == 1) {
+        int ptw = 0, pth = 0;
+        if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &ptw, &pth);
+        // Arrasta com 1 dedo quando ha zoom OU quando a pagina e alta (rola a tira).
+        if (rd_zoom > READER_ZOOM_MIN + 0.01f || reader_page_is_tall(ptw, pth)) {
+            rd_pan_x += dx;
+            rd_pan_y += dy;
+            reader_clamp_pan();
+        }
     }
 }
 
@@ -3879,13 +3939,20 @@ static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
 static void reader_double_tap_zoom(int lx, int ly) {
     if (rd_zoom > READER_ZOOM_MIN + 0.01f) {
         rd_zoom = READER_ZOOM_MIN;
-        rd_pan_x = rd_pan_y = 0.0f;
+        rd_pan_x = 0.0f;
+        // Tira alta continua rolavel: mantem a posicao vertical (so reclampa depois).
+        int tw = 0, th = 0;
+        if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
+        if (!reader_page_is_tall(tw, th)) rd_pan_y = 0.0f;
     } else {
         float target = 2.2f;
         if (target > READER_ZOOM_MAX) target = READER_ZOOM_MAX;
+        // Zoom mantendo o ponto tocado fixo, considerando o scroll atual (tira alta).
+        // k = escala nova / escala atual; reduz a (lx-centro)*(1-target) quando pan=0.
+        float k = rd_zoom > 0.0f ? target / rd_zoom : target;
+        rd_pan_x = (lx - LW() / 2.0f) * (1.0f - k) + k * rd_pan_x;
+        rd_pan_y = (ly - LH() / 2.0f) * (1.0f - k) + k * rd_pan_y;
         rd_zoom = target;
-        rd_pan_x = (lx - LW() / 2.0f) * (1.0f - target);
-        rd_pan_y = (ly - LH() / 2.0f) * (1.0f - target);
     }
     reader_clamp_pan();
     reader_show_overlay();
@@ -3905,7 +3972,7 @@ static void reader_touch_end(SDL_FingerID id, float nx, float ny) {
         if (!wasPinching) {
             int adx = abs(dx), ady = abs(dy);
             if (rd_zoom <= READER_ZOOM_MIN + 0.01f && adx > 70 && adx > ady + 30) {
-                reader_advance(dx < 0 ? 1 : -1);
+                reader_scroll_or_turn(dx < 0 ? 1 : -1);
             } else if (readerSwipeMoved <= TAP_THRESH) {
                 Uint32 now = SDL_GetTicks();
                 int zoomed = rd_zoom > READER_ZOOM_MIN + 0.01f;
@@ -4220,8 +4287,10 @@ int main(int argc, char **argv) {
                             if (b == JOY_A && next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) reader_open_next_chapter_now();
                             else if (b == JOY_X && next_prompt_started) { next_prompt_cancelled = 1; next_prompt_started = 0; reader_show_overlay(); }
                             else if (b == JOY_X && g_reader_source == READER_SRC_REMOTE) offline_download_current_chapter();
-                            else if (b == JOY_R || b == JOY_DRIGHT || b == JOY_DOWN || b == JOY_A) reader_advance(1);
-                            else if (b == JOY_L || b == JOY_DLEFT || b == JOY_UP) reader_advance(-1);
+                            else if (b == JOY_DOWN) reader_scroll_or_turn(1);
+                            else if (b == JOY_UP) reader_scroll_or_turn(-1);
+                            else if (b == JOY_R || b == JOY_DRIGHT || b == JOY_A) reader_scroll_or_turn(1);
+                            else if (b == JOY_L || b == JOY_DLEFT) reader_scroll_or_turn(-1);
                             else if (b == JOY_B) { pageTex = NULL; pageTexPage = 0; screen = g_reader_back; }
                         }
                     }

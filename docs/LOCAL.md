@@ -54,6 +54,21 @@ Arquivos locais usam o mesmo leitor do conteudo online:
 - tela de loading;
 - progresso de leitura.
 
+## Manhwa e Webtoon
+
+Manhwa/Webtoon em tiras verticais tambem pode ser lido pelo app quando estiver
+em `.cbz` ou em pastas com imagens. O leitor detecta imagens muito altas,
+preenche a largura da tela e rola verticalmente antes de virar para a proxima
+pagina.
+
+Funciona melhor quando o capitulo esta assim:
+
+```text
+sdmc:/Mangas/Meu Manhwa/Capitulo 01.cbz
+sdmc:/Mangas/Meu Webtoon/Capitulo 01/001.webp
+sdmc:/Mangas/Meu Webtoon/Capitulo 01/002.webp
+```
+
 ## Baixados vs Local
 
 `Baixados` guarda capitulos baixados pelo proprio Meruem para uso offline.

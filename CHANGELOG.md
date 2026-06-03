@@ -3,6 +3,16 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.18.3
+- Webtoon/manhwa: paginas em tira vertical agora preenchem a LARGURA da tela e
+  rolam na vertical, em vez de aparecerem minusculas e exigirem zoom (que borrava
+  a imagem). Comecam no topo da tira.
+- Arraste com um dedo rola a tira; no controle, A/R/direita/baixo descem a tira
+  e so viram de pagina ao chegar no fim; L/esquerda/cima sobem. Toque ou
+  arraste lateral tambem respeita esse fluxo.
+- Imagens grandes nao tem mais a largura destruida: o redimensionamento passou a
+  limitar largura e altura separadamente, mantendo a nitidez das tiras altas.
+
 ## v0.18.2
 - Textos longos nao invadem mais botoes nem saem da tela: botoes, barras de topo,
   rodapes, modais, listas, Conta, Local, Baixados e o leitor agora desenham com

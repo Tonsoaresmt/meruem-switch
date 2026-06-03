@@ -1,15 +1,13 @@
-Meruem v0.18.1
+Meruem v0.18.3
 
-Novidades:
-- Local agora le arquivos CBZ direto do SD, alem de pastas com JPG, JPEG, PNG, WEBP e BMP.
-- Pasta padrao simplificada para `sdmc:/Mangas`.
-- O app pula a area Local no ciclo de areas quando a pasta configurada esta vazia.
-- Conta > Leitura local ficou mais curta e sem texto estourando a tela.
+Leitura de webtoon/manhwa (tiras verticais):
+- Paginas em tira vertical agora preenchem a LARGURA da tela e rolam na vertical, em vez de aparecerem minusculas e obrigarem a dar zoom (que borrava a imagem). Comecam no topo da tira.
+- Arraste com um dedo rola a tira. No controle, A/R/direita/baixo descem a tira e so viram de pagina ao chegar no fim; L/esquerda/cima sobem. Toque ou arraste lateral tambem respeita esse fluxo.
+- Imagens grandes nao tem mais a largura destruida: o redimensionamento passou a limitar largura e altura separadamente, mantendo a nitidez das tiras altas.
 
-Melhorias:
-- Navegacao de pastas ficou mais limpa: sem prefixo repetido "[pasta]" e com "Voltar pasta" no lugar de "Subir".
-- CBZ local usa o mesmo leitor dos mangas online: toque, giro, zoom, cache, loading e progresso.
-- Itens locais removidos do SD deixam de aparecer em "Continuar lendo".
+Tambem inclui (que ainda nao tinham saido em release):
+- Textos longos nao invadem mais botoes nem saem da tela; quando nao cabem, terminam com reticencias (...). O titulo da serie nao sobrepoe mais os botoes da direita.
+- Conta > Leitura local mostra o FIM do caminho da pasta (ex.: .../Mangas/Deadpool).
+- Layout conferido nos modos portatil (em pe) e TV (dock).
 
-Observacao:
-- CBR/PDF locais ainda ficam para etapa futura.
+Continua com tudo das versoes anteriores: leitura Local (CBZ/imagens do SD), selo de serie ja baixada, toque duplo pra zoom, Baixados com total no SD e "Apagar tudo", download offline em paralelo.

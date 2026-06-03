@@ -97,6 +97,7 @@ Suportado:
 - CBZ;
 - CBR, quando disponivel como paginas de imagem;
 - mangas e HQs compativeis com leitura por paginas;
+- Manhwa/Webtoon em tiras verticais dentro de `.cbz` ou pastas de imagens;
 - CBZ local direto do SD;
 - pastas locais com imagens `.jpg`, `.jpeg`, `.png`, `.webp` ou `.bmp`.
 
