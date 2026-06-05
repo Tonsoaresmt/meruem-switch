@@ -3,6 +3,14 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.18.10
+- Hotfix no leitor de livros: capas/arte em PDF voltam a ser tratadas como capa,
+  ficando centralizadas e preenchendo melhor a tela.
+- Paginas com bastante texto continuam preservadas como folha de livro, sem o
+  recorte agressivo que tinha causado aspecto de imagem.
+- Login QR agora mostra uma mensagem clara quando o servidor/proxy publico ainda
+  nao recebeu as rotas de QR.
+
 ## v0.18.9
 - Leitor de livros deixou de mostrar `Zoom P/M/G/XG`; agora o controle aparece
   como `Texto P/M/G/XG`, alinhado com leitura de livro.

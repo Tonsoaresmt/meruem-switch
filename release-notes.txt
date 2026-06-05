@@ -1,12 +1,13 @@
-Meruem v0.18.9
+Meruem v0.18.10
 
-Polimento do leitor de livros
-- O leitor de PDF/EPUB deixou de tratar livros como "imagem com zoom".
-- O botao agora fica como Texto P/M/G/XG, sem rotulo de Zoom.
-- PDFs preservam a folha inteira, com margens e capa, sem recorte automatico
-  agressivo que fazia a pagina parecer uma foto ampliada.
-- Pinch e toque duplo nao aplicam zoom em livros; arrastar continua rolando a
-  folha e so avanca quando chega ao fim.
+Hotfix de livros e login QR
+- Capas/arte em PDF voltam a ficar centralizadas e preenchendo melhor a tela,
+  sem trazer o branco inferior da folha.
+- Paginas com bastante texto continuam preservadas como pagina de livro, sem
+  recorte agressivo.
+- O app agora detecta quando o servidor ainda nao tem a rota de QR e mostra uma
+  mensagem clara para atualizar o proxy Meruem no Raspberry Pi.
 
-Tambem mantem: login por QR no celular, areas ocultaveis em Conta, area Livros,
-PDF/EPUB online e local, webtoon/manhwa rolavel e melhorias de performance.
+Tambem mantem: Texto P/M/G/XG em livros, login por QR no celular, areas
+ocultaveis em Conta, PDF/EPUB online e local, webtoon/manhwa rolavel e melhorias
+de performance.

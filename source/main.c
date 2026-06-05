@@ -862,6 +862,12 @@ static int token_status(const char *token) {
     return 0;
 }
 
+static int response_looks_like_html(const char *s) {
+    if (!s) return 0;
+    while (*s && isspace((unsigned char)*s)) s++;
+    return !strncasecmp(s, "<!doctype", 9) || !strncasecmp(s, "<html", 5);
+}
+
 typedef struct {
     char id[64];
     char secret[128];
@@ -894,10 +900,16 @@ static int qr_login_start(QrLoginState *st) {
         return 0;
     }
 
+    if (response_looks_like_html(r.data)) {
+        snprintf(st->status, sizeof(st->status), "Proxy sem QR. Atualize o servidor Meruem.");
+        membuf_free(&r);
+        return 0;
+    }
+
     cJSON *root = cJSON_Parse(r.data);
     membuf_free(&r);
     if (!root) {
-        snprintf(st->status, sizeof(st->status), "Resposta QR invalida.");
+        snprintf(st->status, sizeof(st->status), "Resposta QR invalida no servidor.");
         return 0;
     }
 
@@ -925,8 +937,8 @@ static int qr_login_start(QrLoginState *st) {
     }
     cJSON_Delete(root);
 
-    if (!st->id[0] || !st->secret[0]) {
-        snprintf(st->status, sizeof(st->status), "Servidor nao criou sessao QR.");
+    if (!st->id[0] || !st->secret[0] || st->rowCount <= 0) {
+        snprintf(st->status, sizeof(st->status), "Proxy sem QR. Atualize o servidor Meruem.");
         return 0;
     }
     snprintf(st->status, sizeof(st->status), "Escaneie com o celular e entre na sua conta.");
@@ -3881,6 +3893,80 @@ static float reader_default_zoom(void) {
     return READER_ZOOM_MIN;
 }
 
+static int doc_page_text_char_count(fz_page *page) {
+    if (!page || !g_doc_ctx) return 9999;
+    fz_stext_page *text = NULL;
+    int count = 0;
+    fz_var(text);
+    fz_var(count);
+    fz_try(g_doc_ctx) {
+        fz_stext_options opts;
+        memset(&opts, 0, sizeof(opts));
+        text = fz_new_stext_page_from_page(g_doc_ctx, page, &opts);
+        for (fz_stext_block *b = text ? text->first_block : NULL; b; b = b->next) {
+            if (b->type != FZ_STEXT_BLOCK_TEXT) continue;
+            for (fz_stext_line *ln = b->u.t.first_line; ln; ln = ln->next) {
+                for (fz_stext_char *ch = ln->first_char; ch; ch = ch->next) {
+                    if (ch->c > 32) count++;
+                    if (count > 120) break;
+                }
+                if (count > 120) break;
+            }
+            if (count > 120) break;
+        }
+    }
+    fz_always(g_doc_ctx) {
+        if (text) fz_drop_stext_page(g_doc_ctx, text);
+    }
+    fz_catch(g_doc_ctx) {
+        count = 9999; // falhou extracao: nao arrisca recortar texto.
+    }
+    return count;
+}
+
+static int doc_pixel_is_content(const unsigned char *p) {
+    return p && (p[0] < 242 || p[1] < 242 || p[2] < 242);
+}
+
+static int doc_compute_art_crop(fz_pixmap *pix, SDL_Rect *crop, int textChars) {
+    if (!pix || !crop || pix->w <= 0 || pix->h <= 0 || pix->stride < pix->w * 3) return 0;
+    if (textChars > 60) return 0;
+
+    int minX = pix->w, minY = pix->h, maxX = -1, maxY = -1;
+    unsigned long long content = 0;
+    for (int y = 0; y < pix->h; y++) {
+        const unsigned char *row = pix->samples + (size_t)y * (size_t)pix->stride;
+        for (int x = 0; x < pix->w; x++) {
+            const unsigned char *px = row + (size_t)x * 3u;
+            if (!doc_pixel_is_content(px)) continue;
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+            content++;
+        }
+    }
+    crop->x = 0; crop->y = 0; crop->w = pix->w; crop->h = pix->h;
+    if (maxX < minX || maxY < minY) return 0;
+
+    int pad = 8;
+    minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+    if (minX < 0) minX = 0;
+    if (minY < 0) minY = 0;
+    if (maxX >= pix->w) maxX = pix->w - 1;
+    if (maxY >= pix->h) maxY = pix->h - 1;
+    int cw = maxX - minX + 1;
+    int ch = maxY - minY + 1;
+    if (cw < pix->w * 34 / 100 || ch < pix->h * 34 / 100) return 0;
+
+    unsigned long long area = (unsigned long long)cw * (unsigned long long)ch;
+    double density = area ? (double)content / (double)area : 0.0;
+    if (density < 0.12) return 0;
+
+    crop->x = minX; crop->y = minY; crop->w = cw; crop->h = ch;
+    return (cw < pix->w - 6 || ch < pix->h - 6);
+}
+
 // Tira vertical (webtoon/manhwa): proporcao absoluta bem maior que uma pagina
 // normal de manga/HQ (~1.4-1.6) ou pagina dupla (larga). Independe da orientacao
 // da tela, pra nao classificar manga comum como "tira" no modo TV (deitado).
@@ -3897,6 +3983,7 @@ static float reader_base_scale(int tw, int th) {
     reader_view_rect(&view);
     float sw = (float)view.w / (float)tw;
     float sh = (float)view.h / (float)th;
+    if (g_reader_source == READER_SRC_DOC && g_doc_page_fill_view) return sw > sh ? sw : sh;
     if (g_reader_source == READER_SRC_DOC && !g_doc_reflowable) return sw * doc_pdf_width_factor();
     if (g_reader_source == READER_SRC_DOC) return sw;
     if (reader_page_is_tall(tw, th)) return sw;
@@ -3929,7 +4016,7 @@ static void reader_reset_view(void) {
     if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
     SDL_Rect view;
     reader_view_rect(&view);
-    if (reader_page_is_tall(tw, th) || g_reader_source == READER_SRC_DOC) {
+    if (reader_page_is_tall(tw, th) || (g_reader_source == READER_SRC_DOC && !g_doc_page_fill_view)) {
         float h = th * reader_base_scale(tw, th) * rd_zoom;
         if (h > view.h) rd_pan_y = (h - (float)view.h) * 0.5f;   // +maxY = topo
     }
@@ -4041,6 +4128,7 @@ static int doc_render_current_page(void) {
     fz_var(pix);
     fz_try(g_doc_ctx) {
         page = fz_load_page(g_doc_ctx, g_doc, curPage - 1);
+        int textChars = doc_page_text_char_count(page);
         fz_rect bounds = fz_bound_page(g_doc_ctx, page);
         float pw = bounds.x1 - bounds.x0;
         float ph = bounds.y1 - bounds.y0;
@@ -4060,15 +4148,26 @@ static int doc_render_current_page(void) {
         SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
             pix->samples, pix->w, pix->h, 24, pix->stride, SDL_PIXELFORMAT_RGB24);
         if (surf) {
-            // Livros devem parecer folha/pagina, nao uma imagem recortada.
-            // Mantemos margens e capa inteiras; o usuario controla so a leitura.
-            g_doc_page_tex = SDL_CreateTextureFromSurface(gRen, surf);
+            SDL_Rect crop;
+            int hasArtCrop = doc_compute_art_crop(pix, &crop, textChars);
+            SDL_Surface *useSurf = surf;
+            SDL_Surface *cropSurf = NULL;
+            if (hasArtCrop && crop.w > 0 && crop.h > 0) {
+                cropSurf = SDL_CreateRGBSurfaceWithFormat(0, crop.w, crop.h, 24, SDL_PIXELFORMAT_RGB24);
+                if (cropSurf) {
+                    SDL_Rect dst = { 0, 0, crop.w, crop.h };
+                    SDL_BlitSurface(surf, &crop, cropSurf, &dst);
+                    useSurf = cropSurf;
+                }
+            }
+            g_doc_page_tex = SDL_CreateTextureFromSurface(gRen, useSurf);
+            if (cropSurf) SDL_FreeSurface(cropSurf);
             SDL_FreeSurface(surf);
             if (g_doc_page_tex) {
                 SDL_SetTextureScaleMode(g_doc_page_tex, SDL_ScaleModeLinear);
                 pageTex = g_doc_page_tex;
                 pageTexPage = curPage;
-                g_doc_page_fill_view = 0;
+                g_doc_page_fill_view = hasArtCrop ? 1 : 0;
                 g_doc_failed_page = 0;
                 ok = 1;
             }
