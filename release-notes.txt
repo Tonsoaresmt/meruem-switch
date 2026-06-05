@@ -1,4 +1,4 @@
-Meruem v0.18.4
+Meruem v0.18.5
 
 Nova area: Livros
 - O Meruem Switch agora tem a area Livros no acervo.

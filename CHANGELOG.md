@@ -3,7 +3,7 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
-## v0.18.4
+## v0.18.5
 - Area Livros restaurada no Meruem principal, usando `/switch/books/*` para
   listar, baixar e abrir PDF/EPUB do Meruem no mesmo leitor do app.
 - Leitura Local agora tambem reconhece PDF/EPUB no SD, com pasta padrao
