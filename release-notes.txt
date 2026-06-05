@@ -1,13 +1,27 @@
-Meruem v0.18.3
+Meruem v0.18.4
 
-Leitura de webtoon/manhwa (tiras verticais):
-- Paginas em tira vertical agora preenchem a LARGURA da tela e rolam na vertical, em vez de aparecerem minusculas e obrigarem a dar zoom (que borrava a imagem). Comecam no topo da tira.
-- Arraste com um dedo rola a tira. No controle, A/R/direita/baixo descem a tira e so viram de pagina ao chegar no fim; L/esquerda/cima sobem. Toque ou arraste lateral tambem respeita esse fluxo.
-- Imagens grandes nao tem mais a largura destruida: o redimensionamento passou a limitar largura e altura separadamente, mantendo a nitidez das tiras altas.
+Nova area: Livros
+- O Meruem Switch agora tem a area Livros no acervo.
+- PDF e EPUB do Meruem podem ser baixados para o SD e abertos no proprio app.
+- A primeira abertura salva o livro no SD; depois ele abre como livro salvo.
 
-Tambem inclui (que ainda nao tinham saido em release):
-- Textos longos nao invadem mais botoes nem saem da tela; quando nao cabem, terminam com reticencias (...). O titulo da serie nao sobrepoe mais os botoes da direita.
-- Conta > Leitura local mostra o FIM do caminho da pasta (ex.: .../Mangas/Deadpool).
-- Layout conferido nos modos portatil (em pe) e TV (dock).
+Livros do proprio dispositivo
+- A area Local agora tambem reconhece PDF/EPUB.
+- Coloque seus livros em sdmc:/Livros ou escolha uma pasta local em Conta.
+- O progresso aparece em Continuar lendo e funciona sem internet.
 
-Continua com tudo das versoes anteriores: leitura Local (CBZ/imagens do SD), selo de serie ja baixada, toque duplo pra zoom, Baixados com total no SD e "Apagar tudo", download offline em paralelo.
+Leitor de livros melhorado
+- Botao/atalho Y alterna Texto/Zoom em P, M, G e XG.
+- PDF/EPUB nao mostram mais legenda inferior por cima do texto.
+- PDFs em M/G/XG abrem como leitura rolavel, em vez de parecerem foto estatica.
+- Margens brancas sao cortadas automaticamente e capas/arte ocupam melhor a tela.
+
+Navegacao e descoberta
+- O app lembra a ultima area usada: Mangas, HQ, Livros, Baixados ou Local.
+- Ao entrar em Mangas, HQ ou Livros sem busca, o catalogo varia a pagina inicial
+  para mostrar obras diferentes e facilitar descobertas.
+- Busca ativa agora tem Limpar; B ou X limpam a busca antes de sair.
+
+Tambem mantem os recursos recentes: leitura Local de CBZ/imagens, webtoon/manhwa
+rolavel, Baixados com tamanho no SD, auto-update pelo GitHub e controles por
+toque/controle.

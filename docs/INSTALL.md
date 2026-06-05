@@ -51,13 +51,19 @@ sdmc:/switch/Meruem/Meruem.nro
 Depois do login, o app carrega catalogo, favoritos, continuar lendo e dados da
 conta.
 
-## Ler Mangas Proprios no SD
+## Ler Mangas e Livros Proprios no SD
 
 Para ler arquivos proprios sem passar pelo servidor Meruem, coloque seus `.cbz`
 ou pastas com imagens em:
 
 ```text
 sdmc:/Mangas
+```
+
+E coloque livros `.pdf`/`.epub` em:
+
+```text
+sdmc:/Livros
 ```
 
 No app, abra `Conta`, toque em `Usar padrao` e depois troque a area para
@@ -120,8 +126,9 @@ Confira:
 
 ### Algumas obras nao aparecem
 
-O app do Switch mostra apenas conteudo compativel com leitura por paginas de
-imagem. PDF, EPUB e livros de texto sao ocultados por enquanto.
+Mangas/HQ precisam estar disponiveis como paginas de imagem. Livros PDF/EPUB
+aparecem na area `Livros`, e arquivos PDF/EPUB do proprio usuario aparecem na
+area `Local` quando estao no SD.
 
 ### A tela fica roxa ao abrir uma obra
 

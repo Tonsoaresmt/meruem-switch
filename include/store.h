@@ -21,6 +21,9 @@ void store_save_update_seen(const char *tag);
 int  store_load_local_root(char *out, size_t cap);
 void store_save_local_root(const char *path);
 
+int  store_load_last_area(char *out, size_t cap);
+void store_save_last_area(const char *area);
+
 // Estado offline de uma serie: 0 = nada, 1 = parcial, 2 = baixada inteira.
 int  store_get_series_offline(const char *seriesId);
 void store_set_series_offline(const char *seriesId, int state);

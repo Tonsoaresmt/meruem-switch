@@ -16,12 +16,14 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <zlib.h>
 #include <SDL.h>
 #include <SDL_image.h>
+#include <mupdf/fitz.h>
 #include <switch.h>
 #include "net.h"
 #include "cJSON.h"
@@ -48,13 +50,19 @@
 #define READER_OVERLAY_MS 2200
 #define NEXT_CHAPTER_MS 5000
 #define OFFLINE_DIR "sdmc:/switch/Meruem/offline"
+#define BOOKS_DIR "sdmc:/switch/Meruem/books"
 #define LOCAL_ROOT_DEFAULT "sdmc:/Mangas"
+#define LOCAL_BOOKS_DEFAULT "sdmc:/Livros"
 #define LOCAL_ROOT_LEGACY "sdmc:/switch/Meruem/local"
 #define OFFLINE_COUNT_CACHE_MAX 128
 #define LOCAL_MAX_ITEMS 220
 #define LOCAL_MAX_PAGES 1000
 #define LOCAL_PATH_MAX 512
 #define CBZ_MAX_IMAGE_BYTES (64u * 1024u * 1024u)
+#define DOC_EPUB_EM_BASE 22
+#define DOC_EPUB_EM_STEP 8
+#define DOC_TEXT_SCALE_COUNT 4
+#define DOC_READER_BOTTOM_SAFE 22
 
 #define JOY_A      0
 #define JOY_B      1
@@ -72,8 +80,8 @@
 #define JOY_ZR     9
 
 typedef enum { SC_SERIES, SC_FAVORITES, SC_SETTINGS, SC_CONTINUE, SC_OFFLINE, SC_LOCAL, SC_LOCAL_PICKER, SC_CHAPTERS, SC_READER } Screen;
-typedef enum { AREA_MANGA, AREA_COMICS, AREA_DOWNLOADED, AREA_LOCAL, AREA_COUNT } AreaType;
-typedef enum { READER_SRC_REMOTE, READER_SRC_OFFLINE, READER_SRC_LOCAL, READER_SRC_CBZ } ReaderSource;
+typedef enum { AREA_MANGA, AREA_COMICS, AREA_BOOKS, AREA_DOWNLOADED, AREA_LOCAL, AREA_COUNT } AreaType;
+typedef enum { READER_SRC_REMOTE, READER_SRC_OFFLINE, READER_SRC_LOCAL, READER_SRC_CBZ, READER_SRC_DOC } ReaderSource;
 
 static SDL_Renderer *gRen = NULL;
 static SDL_Texture  *gCanvas = NULL;
@@ -83,11 +91,12 @@ static char *g_token = NULL;
 static char g_server[256] = {0};
 static char g_username[96] = {0};
 static int g_offline_mode = 0;
-static const char *AREA_KEYS[AREA_COUNT] = { "manga", "comics", "", "" };
-static const char *AREA_LABELS[AREA_COUNT] = { "Mangas", "HQ", "Baixados", "Local" };
+static const char *AREA_KEYS[AREA_COUNT] = { "manga", "comics", "books", "", "" };
+static const char *AREA_LABELS[AREA_COUNT] = { "Mangas", "HQ", "Livros", "Baixados", "Local" };
 static int areaIdx = AREA_MANGA;
 static char g_search[96] = {0};
 static int catViewMode = 0; // 0 = capas, 1 = lista compacta
+static int catalogRandomizeNext = 1;
 
 static Screen screen = SC_SERIES;
 static int catalogFavorites = 0;
@@ -132,8 +141,10 @@ typedef struct {
     char path[LOCAL_PATH_MAX];
     int isReadCurrent;
     int isCbz;
+    int isDoc;
     int imageCount;
     int cbzCount;
+    int docCount;
     int cbzPages;
     int dirCount;
     unsigned long long size;
@@ -167,6 +178,13 @@ static int pageCount = 1, curPage = 1;
 static ReaderSource g_reader_source = READER_SRC_REMOTE;
 static SDL_Texture *pageTex = NULL;
 static int pageTexPage = 0;
+static fz_context *g_doc_ctx = NULL;
+static fz_document *g_doc = NULL;
+static SDL_Texture *g_doc_page_tex = NULL;
+static int g_doc_reflowable = 0;
+static int g_doc_failed_page = 0;
+static int g_doc_text_scale = 2;   // 0 pequeno, 1 medio, 2 grande, 3 extra
+static int g_doc_page_fill_view = 0;
 static int reader_pending_view_reset = 0;
 static char g_self_path[512] = {0};
 static int curChapIndex = -1;
@@ -249,9 +267,11 @@ static float readerPinchBaseZoom = 1.0f;
 
 static void enter_reader(int idx);
 static void load_catalog(void);
+static void load_favorites(void);
 static void load_offline_manager(void);
 static void load_local_browser(const char *path);
 static void load_local_picker(const char *path);
+static const char *local_start_path(void);
 static void switch_area_to(int nextArea);
 static void draw_area_hint_line(void);
 static void reader_reset_view(void);
@@ -260,6 +280,11 @@ static void reader_show_overlay(void);
 static void reader_clamp_pan(void);
 static void reader_open_next_chapter_now(void);
 static int reader_has_next_chapter(void);
+static int doc_open_file(const char *path);
+static void doc_close(void);
+static int doc_render_current_page(void);
+static void doc_on_orientation_changed(void);
+static void reader_leave(void);
 static void offline_download_current_chapter(void);
 
 static const SDL_Color COL_TEXT = { 220, 220, 228, 255 };
@@ -292,6 +317,10 @@ static int grid_visible_rows(void) {
 static int json_int(cJSON *o, const char *k, int fb) {
     cJSON *it = cJSON_GetObjectItemCaseSensitive(o, k);
     return cJSON_IsNumber(it) ? it->valueint : fb;
+}
+static unsigned long long json_ull(cJSON *o, const char *k, unsigned long long fb) {
+    cJSON *it = cJSON_GetObjectItemCaseSensitive(o, k);
+    return cJSON_IsNumber(it) && it->valuedouble > 0.0 ? (unsigned long long)it->valuedouble : fb;
 }
 static const char *json_str(cJSON *o, const char *k, const char *fb) {
     cJSON *it = cJSON_GetObjectItemCaseSensitive(o, k);
@@ -334,6 +363,7 @@ static void present_color(Uint8 r, Uint8 g, Uint8 b) {
 static void toggle_orientation(void) {
     g_portrait = !g_portrait;
     ensure_canvas();
+    doc_on_orientation_changed();
     if (catScroll > catCount) catScroll = 0;
     if (chapScroll > chapCount) chapScroll = 0;
 }
@@ -410,6 +440,14 @@ static int btn_hit(Btn b, int lx, int ly) {
 static Btn btn_back(void)   { Btn b = { 6, 8, 150, TB - 14, "< Voltar" }; return b; }
 static Btn btn_exit(void)   { Btn b = { 6, 8, 110, TB - 14, "Sair" };     return b; }
 static Btn btn_rotate(void) { Btn b = { LW() - 130, 8, 124, TB - 14, "Girar" }; return b; }
+static const char *doc_text_button_label(void) {
+    const char *kind = (g_reader_source == READER_SRC_DOC && !g_doc_reflowable) ? "Zoom" : "Texto";
+    if (g_doc_text_scale <= 0) return kind[0] == 'Z' ? "Zoom P" : "Texto P";
+    if (g_doc_text_scale == 1) return kind[0] == 'Z' ? "Zoom M" : "Texto M";
+    if (g_doc_text_scale == 2) return kind[0] == 'Z' ? "Zoom G" : "Texto G";
+    return kind[0] == 'Z' ? "Zoom XG" : "Texto XG";
+}
+static Btn btn_doc_text(void) { Btn b = { LW() - 276, 8, 136, TB - 14, doc_text_button_label() }; return b; }
 static Btn btn_continue(void) { Btn b = { 124, 8, 150, TB - 14, "Continuar" }; return b; }
 static Btn btn_favorites(void) { Btn b = { 282, 8, 140, TB - 14, "Favoritos" }; return b; }
 static Btn btn_catalog_home(void) { Btn b = { 282, 8, 140, TB - 14, "Biblioteca" }; return b; }
@@ -418,6 +456,7 @@ static Btn btn_library(void)  { Btn b = { 6, 8, 160, TB - 14, "Biblioteca" }; re
 static Btn btn_area(void)   { Btn b = { LW()/2 - 170, LH() - 50, 110, 40, "Area" };  return b; }
 static Btn btn_search(void) { Btn b = { LW()/2 - 50, LH() - 50, 120, 40, "Buscar" }; return b; }
 static Btn btn_view_mode(void) { Btn b = { LW()/2 + 80, LH() - 50, 120, 40, catViewMode ? "Capas" : "Lista" }; return b; }
+static Btn btn_clear_search(void) { Btn b = { LW()/2 + 80, LH() - 50, 120, 40, "Limpar" }; return b; }
 static Btn btn_use_folder(void) { Btn b = { 12, LH() - 50, 210, 40, "Usar esta pasta" }; return b; }
 static Btn btn_parent_folder(void) { Btn b = { 232, LH() - 50, 210, 40, "Voltar pasta" }; return b; }
 static Btn btn_prev(void)   { Btn b = { 6, LH() - 50, 110, 40, "< Pag" };  return b; }
@@ -447,12 +486,59 @@ static int is_catalog_screen(void) {
 }
 
 static int area_is_online(int area) {
-    return area == AREA_MANGA || area == AREA_COMICS;
+    return area == AREA_MANGA || area == AREA_COMICS || area == AREA_BOOKS;
 }
 
 static const char *current_area_label(void) {
     if (areaIdx < 0 || areaIdx >= AREA_COUNT) return "Mangas";
     return AREA_LABELS[areaIdx];
+}
+
+static const char *area_storage_key(int area) {
+    switch (area) {
+        case AREA_MANGA: return "manga";
+        case AREA_COMICS: return "comics";
+        case AREA_BOOKS: return "books";
+        case AREA_DOWNLOADED: return "downloaded";
+        case AREA_LOCAL: return "local";
+        default: return "manga";
+    }
+}
+
+static int area_from_storage_key(const char *key) {
+    if (!key || !key[0]) return AREA_MANGA;
+    if (!strcasecmp(key, "comics") || !strcasecmp(key, "hq")) return AREA_COMICS;
+    if (!strcasecmp(key, "books") || !strcasecmp(key, "livros")) return AREA_BOOKS;
+    if (!strcasecmp(key, "downloaded") || !strcasecmp(key, "baixados")) return AREA_DOWNLOADED;
+    if (!strcasecmp(key, "local")) return AREA_LOCAL;
+    return AREA_MANGA;
+}
+
+static void save_current_area(void) {
+    store_save_last_area(area_storage_key(areaIdx));
+}
+
+static int catalog_random_page(int totalPages) {
+    if (totalPages <= 1) return 0;
+    int r = rand();
+    if (r < 0) r = -r;
+    return r % totalPages;
+}
+
+static const char *catalog_search_guide(void) {
+    if (areaIdx == AREA_BOOKS) return "Buscar livro/obra (vazio = limpar)";
+    if (areaIdx == AREA_COMICS) return "Buscar HQ (vazio = limpar)";
+    return "Buscar manga (vazio = limpar)";
+}
+
+static void clear_catalog_search(void) {
+    if (!g_search[0]) return;
+    g_search[0] = '\0';
+    catPage = 0;
+    catSel = 0;
+    catScroll = 0;
+    if (catalogFavorites) load_favorites();
+    else load_catalog();
 }
 
 static int is_local_id(const char *id) {
@@ -467,12 +553,16 @@ static int is_cbz_base(const char *pb) {
     return pb && strncmp(pb, "cbz:", 4) == 0;
 }
 
+static int is_doc_base(const char *pb) {
+    return pb && strncmp(pb, "doc:", 4) == 0;
+}
+
 static void return_to_library(void) {
     catalogFavorites = 0;
     catPage = 0;
     catSel = 0;
     catScroll = 0;
-    areaIdx = AREA_MANGA;
+    catalogRandomizeNext = 1;
     load_catalog();
     screen = SC_SERIES;
 }
@@ -719,6 +809,22 @@ static int offline_ensure_dirs(const char *bookId) {
     return 1;
 }
 
+static void books_ensure_dir(void) {
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/Meruem", 0777);
+    mkdir(BOOKS_DIR, 0777);
+}
+
+static const char *book_ext_from_format(const char *fmt) {
+    return (fmt && strcasecmp(fmt, "epub") == 0) ? "epub" : "pdf";
+}
+
+static void book_file_path(const char *id, const char *fmt, char *out, size_t cap) {
+    char safe[128];
+    offline_safe_id(id, safe, sizeof(safe));
+    snprintf(out, cap, "%s/%s.%s", BOOKS_DIR, safe[0] ? safe : "unknown", book_ext_from_format(fmt));
+}
+
 static void offline_count_invalidate(const char *bookId) {
     if (!bookId || !bookId[0]) return;
     for (int i = 0; i < OFFLINE_COUNT_CACHE_MAX; i++) {
@@ -930,6 +1036,13 @@ static void copy_trunc(char *dst, size_t cap, const char *src) {
     dst[i] = '\0';
 }
 
+static int set_doc_page_base(const char *path) {
+    if (!path || !path[0] || strlen(path) + 4 >= sizeof(pageBase)) return 0;
+    memcpy(pageBase, "doc:", 4);
+    copy_trunc(pageBase + 4, sizeof(pageBase) - 4, path);
+    return 1;
+}
+
 static int contains_ascii_ci(const char *hay, const char *needle) {
     size_t hn, nn;
     if (!needle || !needle[0]) return 1;
@@ -1034,6 +1147,12 @@ static int is_cbz_file_name(const char *name) {
     const char *dot = strrchr(name ? name : "", '.');
     if (!dot) return 0;
     return !strcasecmp(dot, ".cbz") || !strcasecmp(dot, ".zip");
+}
+
+static int is_doc_file_name(const char *name) {
+    const char *dot = strrchr(name ? name : "", '.');
+    if (!dot) return 0;
+    return !strcasecmp(dot, ".pdf") || !strcasecmp(dot, ".epub");
 }
 
 static unsigned long fnv1a_path(const char *s) {
@@ -1269,6 +1388,19 @@ static void cbz_display_name(const char *pathOrName, char *out, size_t cap) {
     if (dot && is_cbz_file_name(dot)) *dot = '\0';
 }
 
+static void doc_display_name(const char *pathOrName, char *out, size_t cap) {
+    const char *base = path_basename(pathOrName);
+    if (!out || cap == 0) return;
+    copy_trunc(out, cap, base && base[0] ? base : "Livro");
+    char *dot = strrchr(out, '.');
+    if (dot && is_doc_file_name(dot)) *dot = '\0';
+}
+
+static const char *doc_format_from_path(const char *path) {
+    const char *dot = strrchr(path ? path : "", '.');
+    return (dot && !strcasecmp(dot, ".epub")) ? "epub" : "pdf";
+}
+
 static int local_count_cbz_in_dir(const char *path, unsigned long long *bytes) {
     DIR *d = opendir(path);
     if (!d) return -1;
@@ -1292,6 +1424,29 @@ static int local_count_cbz_in_dir(const char *path, unsigned long long *bytes) {
     return count;
 }
 
+static int local_count_docs_in_dir(const char *path, unsigned long long *bytes) {
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    int count = 0;
+    struct dirent *e;
+    char child[LOCAL_PATH_MAX];
+    if (bytes) *bytes = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (!is_doc_file_name(e->d_name)) continue;
+        if (!path_join(child, sizeof(child), path, e->d_name)) continue;
+        if (path_is_dir(child)) continue;
+        if (count >= LOCAL_MAX_ITEMS) {
+            localTruncated = 1;
+            break;
+        }
+        count++;
+        if (bytes) *bytes += file_size_bytes(child);
+    }
+    closedir(d);
+    return count;
+}
+
 static int local_dir_has_direct_content(const char *path) {
     DIR *d = opendir(path);
     if (!d) return 0;
@@ -1299,7 +1454,7 @@ static int local_dir_has_direct_content(const char *path) {
     char child[LOCAL_PATH_MAX];
     while ((e = readdir(d)) != NULL) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (!is_image_file_name(e->d_name) && !is_cbz_file_name(e->d_name)) continue;
+        if (!is_image_file_name(e->d_name) && !is_cbz_file_name(e->d_name) && !is_doc_file_name(e->d_name)) continue;
         if (!path_join(child, sizeof(child), path, e->d_name)) continue;
         if (!path_is_dir(child)) {
             closedir(d);
@@ -1334,7 +1489,10 @@ static int local_dir_has_visible_content_depth(const char *path, int depth) {
 }
 
 static int local_root_has_visible_content(const char *path) {
-    return local_dir_has_visible_content_depth(path, 2);
+    if (local_dir_has_visible_content_depth(path, 2)) return 1;
+    if (path && strcmp(path, LOCAL_BOOKS_DEFAULT) != 0 &&
+        local_dir_has_visible_content_depth(LOCAL_BOOKS_DEFAULT, 2)) return 1;
+    return 0;
 }
 
 static int local_count_images_in_dir(const char *path, unsigned long long *bytes) {
@@ -1410,6 +1568,7 @@ static void local_root_load_config(void) {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/Meruem", 0777);
     mkdir(LOCAL_ROOT_DEFAULT, 0777);
+    mkdir(LOCAL_BOOKS_DEFAULT, 0777);
     if (strcmp(g_local_root, LOCAL_ROOT_LEGACY) == 0) mkdir(LOCAL_ROOT_LEGACY, 0777);
     snprintf(g_local_cwd, sizeof(g_local_cwd), "%s", g_local_root);
 }
@@ -1421,13 +1580,20 @@ static void local_root_save(const char *path) {
     store_save_local_root(g_local_root);
 }
 
+static const char *local_start_path(void) {
+    if (path_is_dir(g_local_root)) return g_local_root;
+    if (path_is_dir(LOCAL_BOOKS_DEFAULT)) return LOCAL_BOOKS_DEFAULT;
+    return g_local_root;
+}
+
 static void load_local_browser(const char *path) {
     DIR *d;
     struct dirent *e;
     char child[LOCAL_PATH_MAX];
     unsigned long long hereBytes = 0;
     unsigned long long hereCbzBytes = 0;
-    int hereImages, hereCbz;
+    unsigned long long hereDocBytes = 0;
+    int hereImages, hereCbz, hereDocs;
     localN = 0;
     localSel = 0;
     localScroll = 0;
@@ -1443,6 +1609,7 @@ static void load_local_browser(const char *path) {
     }
     hereImages = local_count_images_in_dir(g_local_cwd, &hereBytes);
     hereCbz = local_count_cbz_in_dir(g_local_cwd, &hereCbzBytes);
+    hereDocs = local_count_docs_in_dir(g_local_cwd, &hereDocBytes);
     if (hereImages > 0 && contains_ascii_ci(path_basename(g_local_cwd), g_search)) {
         LocalItem *it = &localItems[localN++];
         memset(it, 0, sizeof(*it));
@@ -1450,15 +1617,34 @@ static void load_local_browser(const char *path) {
         snprintf(it->path, sizeof(it->path), "%s", g_local_cwd);
         it->isReadCurrent = 1;
         it->isCbz = 0;
+        it->isDoc = 0;
         it->imageCount = hereImages;
         it->cbzCount = hereCbz > 0 ? hereCbz : 0;
+        it->docCount = hereDocs > 0 ? hereDocs : 0;
         it->cbzPages = 0;
         it->dirCount = local_count_dirs_in_dir(g_local_cwd);
         it->size = hereBytes;
     }
+    if (strcmp(g_local_cwd, g_local_root) == 0 && strcmp(g_local_cwd, LOCAL_BOOKS_DEFAULT) != 0 &&
+        localN < LOCAL_MAX_ITEMS && path_is_dir(LOCAL_BOOKS_DEFAULT) &&
+        (!g_search[0] || contains_ascii_ci("Livros do dispositivo", g_search) || contains_ascii_ci("Livros", g_search))) {
+        unsigned long long docBytes = 0;
+        int docCount = local_count_docs_in_dir(LOCAL_BOOKS_DEFAULT, &docBytes);
+        int dirCount = local_count_dirs_in_dir(LOCAL_BOOKS_DEFAULT);
+        if (docCount > 0 || dirCount > 0 || !local_root_has_visible_content(g_local_root)) {
+            LocalItem *it = &localItems[localN++];
+            memset(it, 0, sizeof(*it));
+            snprintf(it->name, sizeof(it->name), "Livros do dispositivo");
+            snprintf(it->path, sizeof(it->path), "%s", LOCAL_BOOKS_DEFAULT);
+            it->dirCount = dirCount;
+            it->docCount = docCount > 0 ? docCount : 0;
+            it->size = docBytes;
+        }
+    }
     while ((e = readdir(d)) != NULL) {
         unsigned long long imageBytes = 0;
         unsigned long long cbzBytes = 0;
+        unsigned long long docBytes = 0;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         if (!path_join(child, sizeof(child), g_local_cwd, e->d_name)) {
             localTruncated = 1;
@@ -1476,13 +1662,16 @@ static void load_local_browser(const char *path) {
             snprintf(it->path, sizeof(it->path), "%s", child);
             it->isReadCurrent = 0;
             it->isCbz = 0;
+            it->isDoc = 0;
             it->imageCount = local_count_images_in_dir(child, &imageBytes);
             if (it->imageCount < 0) it->imageCount = 0;
             it->cbzCount = local_count_cbz_in_dir(child, &cbzBytes);
             if (it->cbzCount < 0) it->cbzCount = 0;
+            it->docCount = local_count_docs_in_dir(child, &docBytes);
+            if (it->docCount < 0) it->docCount = 0;
             it->cbzPages = 0;
             it->dirCount = local_count_dirs_in_dir(child);
-            it->size = imageBytes + cbzBytes;
+            it->size = imageBytes + cbzBytes + docBytes;
         } else if (is_cbz_file_name(e->d_name)) {
             char display[160];
             cbz_display_name(e->d_name, display, sizeof(display));
@@ -1493,16 +1682,35 @@ static void load_local_browser(const char *path) {
             snprintf(it->path, sizeof(it->path), "%s", child);
             it->isReadCurrent = 0;
             it->isCbz = 1;
+            it->isDoc = 0;
             it->imageCount = 0;
             it->cbzCount = 1;
+            it->docCount = 0;
             it->cbzPages = cbz_count_pages_file(child);
+            it->dirCount = 0;
+            it->size = file_size_bytes(child);
+        } else if (is_doc_file_name(e->d_name)) {
+            char display[160];
+            doc_display_name(e->d_name, display, sizeof(display));
+            if (!contains_ascii_ci(display, g_search) && !contains_ascii_ci(e->d_name, g_search)) continue;
+            LocalItem *it = &localItems[localN++];
+            memset(it, 0, sizeof(*it));
+            copy_trunc(it->name, sizeof(it->name), display);
+            snprintf(it->path, sizeof(it->path), "%s", child);
+            it->isReadCurrent = 0;
+            it->isCbz = 0;
+            it->isDoc = 1;
+            it->imageCount = 0;
+            it->cbzCount = 0;
+            it->docCount = 1;
+            it->cbzPages = 0;
             it->dirCount = 0;
             it->size = file_size_bytes(child);
         }
     }
     closedir(d);
     qsort(localItems, localN, sizeof(LocalItem), local_item_cmp);
-    if (localN == 0) snprintf(localStatus, sizeof(localStatus), g_search[0] ? "Nada bateu com a busca nesta pasta." : "Pasta vazia. Use CBZ ou pastas com imagens.");
+    if (localN == 0) snprintf(localStatus, sizeof(localStatus), g_search[0] ? "Nada bateu com a busca nesta pasta." : "Pasta vazia. Use CBZ, PDF/EPUB ou pastas com imagens.");
     else if (localTruncated) snprintf(localStatus, sizeof(localStatus), "Lista limitada. Use uma pasta menor se faltar algo.");
 }
 
@@ -1539,12 +1747,17 @@ static void load_local_picker(const char *path) {
         snprintf(it->path, sizeof(it->path), "%s", child);
         it->isReadCurrent = 0;
         it->isCbz = 0;
+        it->isDoc = 0;
         it->imageCount = local_count_images_in_dir(child, &it->size);
         if (it->imageCount < 0) it->imageCount = 0;
         unsigned long long cbzBytes = 0;
         it->cbzCount = local_count_cbz_in_dir(child, &cbzBytes);
         if (it->cbzCount < 0) it->cbzCount = 0;
         it->size += cbzBytes;
+        unsigned long long docBytes = 0;
+        it->docCount = local_count_docs_in_dir(child, &docBytes);
+        if (it->docCount < 0) it->docCount = 0;
+        it->size += docBytes;
         it->dirCount = local_count_dirs_in_dir(child);
     }
     closedir(d);
@@ -1686,6 +1899,7 @@ static PageCacheEntry *page_cache_slot_for(const char *bookId, const char *baseU
 }
 
 static void page_cache_request(int page) {
+    if (g_reader_source == READER_SRC_DOC) return;
     if (page < 1 || page > pageCount || !curBookId[0] || !pageBase[0]) return;
     PageCacheEntry *e = page_cache_slot_for(curBookId, pageBase, page);
     if (!e || e->loading || e->tex || e->failed) {
@@ -1746,6 +1960,7 @@ static void page_cache_pump(void) {
 }
 
 static int page_cache_apply_current(void) {
+    if (g_reader_source == READER_SRC_DOC) return doc_render_current_page();
     PageCacheEntry *e = page_cache_current();
     if (!e || !e->tex) return 0;
     e->lastUsed = SDL_GetTicks();
@@ -1762,16 +1977,19 @@ static int page_cache_apply_current(void) {
 }
 
 static int page_cache_current_failed(void) {
+    if (g_reader_source == READER_SRC_DOC) return g_doc_failed_page;
     PageCacheEntry *e = page_cache_current();
     return e && e->failed && !e->loading && !e->tex;
 }
 
 static int page_cache_current_loading(void) {
+    if (g_reader_source == READER_SRC_DOC) return 0;
     PageCacheEntry *e = page_cache_current();
     return e && (e->loading || e->ready);
 }
 
 static void page_cache_prefetch_around(void) {
+    if (g_reader_source == READER_SRC_DOC) return;
     page_cache_request(curPage);
     if (curPage < pageCount) page_cache_request(curPage + 1);
     if (curPage > 1) page_cache_request(curPage - 1);
@@ -2189,6 +2407,10 @@ static void offline_download_current_chapter(void) {
 
 // Baixa TODOS os capitulos da serie aberta (g_ser) para o SD.
 static void offline_download_all_chapters(void) {
+    if (areaIdx == AREA_BOOKS) {
+        info_screen("Livros baixam ao abrir.", "Abra o volume desejado para salvar PDF/EPUB no SD.");
+        return;
+    }
     if (!g_ser || chapCount <= 0) {
         message_screen("Nenhum capitulo para baixar.", "Abra a serie novamente.");
         return;
@@ -2205,7 +2427,7 @@ static void offline_download_all_chapters(void) {
         }
     }
     if (totalPages <= 0) {
-        message_screen("Esta serie nao tem paginas de imagem.", "Pode ser PDF/EPUB (nao suportado no Switch).");
+        message_screen("Esta serie nao tem paginas de imagem.", "Use a aba Livros para PDF/EPUB.");
         return;
     }
     {
@@ -2315,7 +2537,7 @@ static int login_welcome_screen(int hasUser, const char *user) {
             text_draw_fit(gRen, "Bem-vindo de volta!", bx + 28, by + 96, bw - 56, COL_TEXT, 0);
             snprintf(line, sizeof(line), "Conta: %s", user);
             text_draw_fit(gRen, line, bx + 28, by + 140, bw - 56, COL_SEL, 0);
-            text_draw_fit(gRen, "Entrar: Mangas/HQ. Offline/Local: sem rede.", bx + 28, by + 186, bw - 56, COL_SOFT, 0);
+            text_draw_fit(gRen, "Entrar: Mangas/HQ/Livros. Offline/Local: sem rede.", bx + 28, by + 186, bw - 56, COL_SOFT, 0);
         } else {
             text_draw_fit(gRen, "Bem-vindo! Para ler no Switch:", bx + 28, by + 96, bw - 56, COL_TEXT, 0);
             text_draw_fit(gRen, "1) Crie sua conta no Meruem:", bx + 28, by + 142, bw - 56, COL_SOFT, 0);
@@ -2471,7 +2693,7 @@ static int configure_server(void) {
 
 static int ensure_online_session(void) {
     if (!g_offline_mode && g_token) return 1;
-    if (!info_screen("Area online precisa de login.", "Entre com sua conta Meruem para acessar Mangas/HQ.")) return 0;
+    if (!info_screen("Area online precisa de login.", "Entre com sua conta Meruem para acessar Mangas/HQ/Livros.")) return 0;
     if (!authenticate()) return 0;
     return (!g_offline_mode && g_token);
 }
@@ -2490,21 +2712,26 @@ static void switch_area_to(int nextArea) {
     if (area_is_online(areaIdx)) {
         if (!ensure_online_session()) {
             areaIdx = AREA_DOWNLOADED;
+            save_current_area();
             g_offline_back = SC_SERIES;
             load_offline_manager();
             screen = SC_OFFLINE;
             return;
         }
         g_offline_mode = 0;
+        save_current_area();
+        catalogRandomizeNext = 1;
         load_catalog();
         screen = SC_SERIES;
     } else if (areaIdx == AREA_DOWNLOADED) {
+        save_current_area();
         g_offline_back = SC_SERIES;
         load_offline_manager();
         screen = SC_OFFLINE;
     } else {
+        save_current_area();
         g_local_back = SC_SERIES;
-        load_local_browser(g_local_root);
+        load_local_browser(local_start_path());
         screen = SC_LOCAL;
     }
 }
@@ -2534,9 +2761,14 @@ static void load_catalog(void) {
         return;
     }
     char url[512];
-    int n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
-                     g_server,
-                     AREA_KEYS[areaIdx], PAGE_SIZE, catPage);
+    int n;
+    if (areaIdx == AREA_BOOKS) {
+        n = snprintf(url, sizeof(url), "%s/switch/books/catalog?size=%d&page=%d",
+                     g_server, PAGE_SIZE, catPage);
+    } else {
+        n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
+                     g_server, AREA_KEYS[areaIdx], PAGE_SIZE, catPage);
+    }
     if (g_search[0] && n > 0 && (size_t)n < sizeof(url)) {
         char enc[200];
         net_urlencode(g_search, enc, sizeof(enc));
@@ -2545,11 +2777,51 @@ static void load_catalog(void) {
     struct membuf r = {0};
     long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
     if (code == 200 && r.data) g_cat = cJSON_Parse(r.data);
+    else catalogLoadFailed = 1;
     membuf_free(&r);
     catCount = 0; catTotal = 1; catScroll = 0;
     if (g_cat) {
         catTotal = json_int(g_cat, "totalPages", 1);
         catCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_cat, "series"));
+    }
+    if (catalogRandomizeNext && !g_search[0] && catPage == 0 && catTotal > 1) {
+        int targetPage = catalog_random_page(catTotal);
+        catalogRandomizeNext = 0;
+        if (targetPage != catPage) {
+            cJSON *oldCat = g_cat;
+            int oldPage = catPage;
+            int oldTotal = catTotal;
+            int oldCount = catCount;
+            g_cat = NULL;
+            if (areaIdx == AREA_BOOKS) {
+                n = snprintf(url, sizeof(url), "%s/switch/books/catalog?size=%d&page=%d",
+                             g_server, PAGE_SIZE, targetPage);
+            } else {
+                n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
+                             g_server, AREA_KEYS[areaIdx], PAGE_SIZE, targetPage);
+            }
+            struct membuf r2 = {0};
+            long code2 = net_request_timeout(url, "GET", NULL, g_token, &r2, NULL, 8L, 20L);
+            if (code2 == 200 && r2.data) {
+                g_cat = cJSON_Parse(r2.data);
+                catalogLoadFailed = 0;
+            }
+            membuf_free(&r2);
+            if (g_cat) {
+                if (oldCat) cJSON_Delete(oldCat);
+                catPage = targetPage;
+                catCount = 0; catTotal = 1; catScroll = 0;
+                catTotal = json_int(g_cat, "totalPages", 1);
+                catCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_cat, "series"));
+            } else {
+                g_cat = oldCat;
+                catPage = oldPage;
+                catTotal = oldTotal;
+                catCount = oldCount;
+            }
+        }
+    } else {
+        catalogRandomizeNext = 0;
     }
     if (catSel >= catCount) catSel = catCount > 0 ? catCount - 1 : 0;
     if (catSel < 0) catSel = 0;
@@ -2569,7 +2841,11 @@ static void load_favorites(void) {
         return;
     }
     char url[512];
-    snprintf(url, sizeof(url), "%s/switch/favorites?size=%d&page=%d", g_server, PAGE_SIZE, catPage);
+    if (areaIdx == AREA_BOOKS) {
+        snprintf(url, sizeof(url), "%s/switch/books/favorites?size=%d&page=%d", g_server, PAGE_SIZE, catPage);
+    } else {
+        snprintf(url, sizeof(url), "%s/switch/favorites?size=%d&page=%d", g_server, PAGE_SIZE, catPage);
+    }
     struct membuf r = {0};
     long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
     if (code == 200 && r.data) g_cat = cJSON_Parse(r.data);
@@ -2628,13 +2904,13 @@ static void load_profile(void) {
 
     if (hasFullAccess) {
         snprintf(profileChapters, sizeof(profileChapters), "Capitulos: ilimitado");
-        snprintf(profileBooks, sizeof(profileBooks), "Livros: ocultos nesta versao do Switch.");
+        snprintf(profileBooks, sizeof(profileBooks), "Livros: PDF/EPUB liberados nesta versao.");
     } else {
         int used = json_int(chapters, "usedToday", 0);
         int remaining = json_int(chapters, "remainingToday", 0);
         int limit = json_int(chapters, "limit", 3);
         snprintf(profileChapters, sizeof(profileChapters), "Capitulos hoje: %d/%d usados, %d restantes", used, limit, remaining);
-        snprintf(profileBooks, sizeof(profileBooks), "Livros: ocultos nesta versao do Switch.");
+        snprintf(profileBooks, sizeof(profileBooks), "Livros: abra a aba Livros para baixar/ler PDF e EPUB.");
     }
 
     snprintf(profileCounts, sizeof(profileCounts), "Favoritos %d  Prateleira %d  Continuar %d",
@@ -2691,14 +2967,15 @@ static void enter_series(int idx) {
     present_color(20, 20, 40);
     if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
     char url[512];
-    snprintf(url, sizeof(url), "%s/switch/series/%s", g_server, id);
+    if (areaIdx == AREA_BOOKS) snprintf(url, sizeof(url), "%s/switch/books/series/%s", g_server, id);
+    else                       snprintf(url, sizeof(url), "%s/switch/series/%s", g_server, id);
     struct membuf r = {0};
     long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
     if (code == 200 && r.data) g_ser = cJSON_Parse(r.data);
     membuf_free(&r);
     chapCount = 0; chapSel = 0; chapScroll = 0;
     if (g_ser) chapCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"));
-    recompute_series_offline();
+    if (areaIdx != AREA_BOOKS) recompute_series_offline();
     g_chapters_back = screen;
     screen = SC_CHAPTERS;
 }
@@ -2709,6 +2986,7 @@ static void enter_local_reader_from_folder(const char *folder, const char *serie
     char parent[LOCAL_PATH_MAX];
     const char *folderName;
     if (!folder || !folder[0]) return;
+    doc_close();
     if (!path_is_dir(folder)) {
         message_screen("Pasta local nao encontrada.", "Volte em Conta e escolha outra pasta.");
         return;
@@ -2768,6 +3046,7 @@ static void enter_local_reader_from_cbz(const char *path, const char *seriesTitl
     char parent[LOCAL_PATH_MAX];
     char display[160];
     if (!path || !path[0]) return;
+    doc_close();
     if (!file_exists(path) || path_is_dir(path)) {
         message_screen("CBZ local nao encontrado.", "Volte em Local e escolha outro arquivo.");
         return;
@@ -2821,9 +3100,141 @@ static void enter_local_reader_from_cbz(const char *path, const char *seriesTitl
     }
 }
 
+static void book_progress_modal(const char *title, const char *line) {
+    SDL_Color blue = { 96, 154, 232, 255 };
+    begin_frame();
+    draw_background();
+    draw_modal_box("Livros Meruem", title, line, NULL, blue, NULL);
+    end_frame();
+}
+
+static int enter_doc_reader_from_chapter(cJSON *c, Screen back) {
+    if (!c) return 0;
+    if (!g_doc_ctx) {
+        message_screen("Leitor de livros indisponivel.", "MuPDF nao inicializou nesta execucao.");
+        return 0;
+    }
+    const char *id = json_str(c, "id", "");
+    const char *file = json_str(c, "file", "");
+    const char *fmt = json_str(c, "format", "pdf");
+    const char *num = json_str(c, "number", "?");
+    const char *ttl = json_str(c, "title", "");
+    if (!id[0] || !file[0]) {
+        message_screen("Livro sem arquivo para abrir.", "Atualize o servidor Meruem e tente novamente.");
+        return 0;
+    }
+
+    char path[LOCAL_PATH_MAX];
+    book_file_path(id, fmt, path, sizeof(path));
+    books_ensure_dir();
+    int downloadedNow = 0;
+    if (!file_exists(path)) {
+        char url[800];
+        if (strncmp(file, "https://", 8) == 0 || strncmp(file, "http://", 7) == 0) {
+            snprintf(url, sizeof(url), "%s", file);
+        } else {
+            snprintf(url, sizeof(url), "%s%s", g_server, file);
+        }
+        book_progress_modal("Primeira abertura: salvando no SD...", ttl[0] ? ttl : curSeriesTitle);
+        long code = net_download_file_timeout(url, g_token, path, NULL, 8L, 240L);
+        if (code != 200) {
+            remove(path);
+            message_screen("Nao consegui baixar este livro.", "Verifique internet/login e tente abrir de novo.");
+            return 0;
+        }
+        downloadedNow = 1;
+    }
+
+    snprintf(curBookId, sizeof(curBookId), "%s", id);
+    snprintf(curChapLabel, sizeof(curChapLabel), "#%s %s", num, ttl[0] ? ttl : "Livro");
+    if (!set_doc_page_base(path)) {
+        message_screen("Caminho do livro longo demais.", "Tente baixar novamente ou use outro arquivo.");
+        return 0;
+    }
+    curPage = store_get_progress(curBookId);
+    if (curPage < 1) curPage = 1;
+    localPageN = 0;
+    localCbzPageN = 0;
+    g_reader_source = READER_SRC_DOC;
+    curChapIndex = -1;
+    next_prompt_started = 0;
+    next_prompt_cancelled = 0;
+    g_reader_back = back;
+    book_progress_modal(downloadedNow ? "Download pronto. Abrindo..." : "Abrindo livro salvo no SD...",
+                        ttl[0] ? ttl : curSeriesTitle);
+    if (!doc_open_file(path)) {
+        message_screen("Nao consegui abrir este livro.", "O arquivo pode estar corrompido ou em formato nao suportado.");
+        return 0;
+    }
+    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
+    doc_render_current_page();
+    reader_show_overlay();
+    screen = SC_READER;
+    return 1;
+}
+
+static int enter_local_reader_from_doc(const char *path, const char *seriesTitle,
+                                       const char *chapLabel, Screen back) {
+    char id[96];
+    char parent[LOCAL_PATH_MAX];
+    char display[160];
+    if (!path || !path[0]) return 0;
+    if (!g_doc_ctx) {
+        message_screen("Leitor de livros indisponivel.", "MuPDF nao inicializou nesta execucao.");
+        return 0;
+    }
+    if (!file_exists(path) || path_is_dir(path)) {
+        message_screen("Livro local nao encontrado.", "Confira se o arquivo ainda esta no SD.");
+        return 0;
+    }
+    if (strlen(path) + 4 >= sizeof(pageBase)) {
+        message_screen("Caminho local longo demais.", "Coloque o livro em uma pasta mais curta.");
+        return 0;
+    }
+    doc_close();
+    doc_display_name(path, display, sizeof(display));
+    local_make_book_id(path, id, sizeof(id));
+    path_parent(path, parent, sizeof(parent));
+    snprintf(curBookId, sizeof(curBookId), "%s", id);
+    snprintf(curSeriesId, sizeof(curSeriesId), "local");
+    copy_trunc(curSeriesTitle, sizeof(curSeriesTitle),
+               (seriesTitle && seriesTitle[0]) ? seriesTitle : (path_basename(parent)[0] ? path_basename(parent) : "Local"));
+    copy_trunc(curChapLabel, sizeof(curChapLabel),
+               (chapLabel && chapLabel[0]) ? chapLabel : (display[0] ? display : "Livro local"));
+    curSeriesCover[0] = '\0';
+    if (!set_doc_page_base(path)) {
+        message_screen("Caminho local longo demais.", "Coloque o livro em uma pasta mais curta.");
+        return 0;
+    }
+    curPage = store_get_progress(curBookId);
+    if (curPage < 1) curPage = 1;
+    localPageN = 0;
+    localCbzPageN = 0;
+    g_reader_source = READER_SRC_DOC;
+    curChapIndex = -1;
+    next_prompt_started = 0;
+    next_prompt_cancelled = 0;
+    g_reader_back = back;
+    book_progress_modal("Abrindo livro local...", display[0] ? display : doc_format_from_path(path));
+    if (!doc_open_file(path)) {
+        message_screen("Nao consegui abrir este livro local.", "Use PDF/EPUB sem DRM e tente novamente.");
+        return 0;
+    }
+    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
+    doc_render_current_page();
+    reader_show_overlay();
+    screen = SC_READER;
+    return 1;
+}
+
 static void enter_reader(int idx) {
     cJSON *c = chap_at(idx);
     if (!c) return;
+    if (areaIdx == AREA_BOOKS) {
+        enter_doc_reader_from_chapter(c, SC_CHAPTERS);
+        return;
+    }
+    doc_close();
     const char *pb = json_str(c, "pageBase", "");
     if (!pb[0]) return;
     localPageN = 0;
@@ -2862,12 +3273,44 @@ static void enter_reader_from_record_source(const char *bookId, ReaderSource sou
         enter_local_reader_from_cbz(pb + 4, st, cl, back);
         return;
     }
+    if (is_doc_base(pb)) {
+        const char *path = pb + 4;
+        if (!path[0] || !file_exists(path) || path_is_dir(path)) {
+            message_screen("Livro salvo nao encontrado.", "Abra a aba Livros para baixar novamente.");
+            return;
+        }
+        doc_close();
+        snprintf(curBookId, sizeof(curBookId), "%s", bookId);
+        snprintf(curSeriesId, sizeof(curSeriesId), "%s", sid);
+        snprintf(curSeriesTitle, sizeof(curSeriesTitle), "%s", st);
+        snprintf(curSeriesCover, sizeof(curSeriesCover), "%s", cv);
+        snprintf(curChapLabel, sizeof(curChapLabel), "%s", cl[0] ? cl : "Livro");
+        snprintf(pageBase, sizeof(pageBase), "%s", pb);
+        curPage = page < 1 ? 1 : page;
+        g_reader_source = READER_SRC_DOC;
+        curChapIndex = -1;
+        localPageN = 0;
+        localCbzPageN = 0;
+        g_reader_back = back;
+        book_progress_modal("Abrindo livro salvo...", st[0] ? st : "Livro");
+        if (!doc_open_file(path)) {
+            message_screen("Nao consegui abrir este livro salvo.", "O arquivo pode ter sido corrompido no SD.");
+            return;
+        }
+        if (curPage > pageCount) curPage = pageCount;
+        store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
+        doc_render_current_page();
+        reader_show_overlay();
+        screen = SC_READER;
+        return;
+    }
     if (is_local_base(pb)) {
         const char *folder = is_local_base(pb) ? pb + 6 : "";
         enter_local_reader_from_folder(folder, st, cl, back);
         return;
     }
     if (is_local_id(bookId)) return;
+    doc_close();
     snprintf(curBookId, sizeof(curBookId), "%s", bookId);
     snprintf(curSeriesId, sizeof(curSeriesId), "%s", sid);
     snprintf(curSeriesTitle, sizeof(curSeriesTitle), "%s", st);
@@ -2930,6 +3373,9 @@ static void load_continue(void) {
             if (is_cbz_base(pb)) {
                 const char *path = pb + 4;
                 keep = path[0] && file_exists(path) && !path_is_dir(path);
+            } else if (is_doc_base(pb)) {
+                const char *path = pb + 4;
+                keep = path[0] && file_exists(path) && !path_is_dir(path);
             } else if (is_local_id(contIds[i]) || is_local_base(pb)) {
                 const char *folder = is_local_base(pb) ? pb + 6 : "";
                 keep = folder[0] && path_is_dir(folder);
@@ -2972,7 +3418,7 @@ static void load_offline_manager(void) {
         int saved;
         char st[256] = {0}, cl[64] = {0}, pb[512] = {0};
         store_entry(ids[i], NULL, 0, st, sizeof(st), cl, sizeof(cl), pb, sizeof(pb), NULL, 0, NULL, &pages);
-        if (is_local_id(ids[i]) || is_local_base(pb) || is_cbz_base(pb)) continue;
+        if (is_local_id(ids[i]) || is_local_base(pb) || is_cbz_base(pb) || is_doc_base(pb)) continue;
         if (g_search[0] && !contains_ascii_ci(st, g_search) && !contains_ascii_ci(cl, g_search)) continue;
         if (pages < 1) pages = 1;
         saved = offline_count_pages(ids[i], pages);
@@ -3040,6 +3486,88 @@ static void reader_reset_touch(void) {
     readerPinchBaseZoom = rd_zoom;
 }
 
+static void reader_view_rect(SDL_Rect *r) {
+    r->x = 0;
+    r->y = 0;
+    r->w = LW();
+    r->h = LH();
+    if (g_reader_source == READER_SRC_DOC) {
+        r->y = TB;
+        r->h = LH() - TB - DOC_READER_BOTTOM_SAFE;
+        if (r->h < 160) {
+            r->y = 0;
+            r->h = LH();
+        }
+    }
+}
+
+static int doc_epub_em(void) {
+    int scale = g_doc_text_scale;
+    if (scale < 0) scale = 0;
+    if (scale >= DOC_TEXT_SCALE_COUNT) scale = DOC_TEXT_SCALE_COUNT - 1;
+    return DOC_EPUB_EM_BASE + scale * DOC_EPUB_EM_STEP;
+}
+
+static float doc_pdf_zoom(void) {
+    static const float zooms[DOC_TEXT_SCALE_COUNT] = { 0.94f, 1.0f, 1.16f, 1.34f };
+    int scale = g_doc_text_scale;
+    if (scale < 0) scale = 0;
+    if (scale >= DOC_TEXT_SCALE_COUNT) scale = DOC_TEXT_SCALE_COUNT - 1;
+    return zooms[scale];
+}
+
+static float reader_default_zoom(void) {
+    return (g_reader_source == READER_SRC_DOC && !g_doc_reflowable) ? doc_pdf_zoom() : READER_ZOOM_MIN;
+}
+
+static int doc_pixel_is_content(const unsigned char *p) {
+    // Margens de PDF/EPUB geralmente sao branco puro; mantemos tons claros suaves
+    // como margem para evitar cortar fundo de papel.
+    return p && (p[0] < 242 || p[1] < 242 || p[2] < 242);
+}
+
+static int doc_compute_crop(fz_pixmap *pix, SDL_Rect *crop, int *fillView) {
+    if (fillView) *fillView = 0;
+    if (!pix || !crop || pix->w <= 0 || pix->h <= 0 || pix->stride < pix->w * 3) return 0;
+    int minX = pix->w, minY = pix->h, maxX = -1, maxY = -1;
+    unsigned long long content = 0;
+    for (int y = 0; y < pix->h; y++) {
+        const unsigned char *row = pix->samples + (size_t)y * (size_t)pix->stride;
+        for (int x = 0; x < pix->w; x++) {
+            const unsigned char *px = row + (size_t)x * 3u;
+            if (!doc_pixel_is_content(px)) continue;
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+            content++;
+        }
+    }
+    crop->x = 0; crop->y = 0; crop->w = pix->w; crop->h = pix->h;
+    if (maxX < minX || maxY < minY) return 0;
+
+    int pad = 10;
+    minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+    if (minX < 0) minX = 0;
+    if (minY < 0) minY = 0;
+    if (maxX >= pix->w) maxX = pix->w - 1;
+    if (maxY >= pix->h) maxY = pix->h - 1;
+    int cw = maxX - minX + 1;
+    int ch = maxY - minY + 1;
+
+    // Se o conteudo detectado e minuscule, provavelmente e folha de rosto,
+    // copyright ou pagina quase vazia; nesse caso nao ampliamos agressivamente.
+    if (cw < pix->w * 28 / 100 || ch < pix->h * 28 / 100) return 0;
+
+    crop->x = minX; crop->y = minY; crop->w = cw; crop->h = ch;
+    if (fillView) {
+        unsigned long long area = (unsigned long long)cw * (unsigned long long)ch;
+        double density = area ? (double)content / (double)area : 0.0;
+        *fillView = density >= 0.16 && cw >= pix->w * 35 / 100 && ch >= pix->h * 35 / 100;
+    }
+    return (cw < pix->w - 6 || ch < pix->h - 6);
+}
+
 // Tira vertical (webtoon/manhwa): proporcao absoluta bem maior que uma pagina
 // normal de manga/HQ (~1.4-1.6) ou pagina dupla (larga). Independe da orientacao
 // da tela, pra nao classificar manga comum como "tira" no modo TV (deitado).
@@ -3052,9 +3580,13 @@ static int reader_page_is_tall(int tw, int th) {
 // tiras altas, pra nao ficarem minusculas e exigirem zoom (que borra).
 static float reader_base_scale(int tw, int th) {
     if (tw <= 0 || th <= 0) return 1.0f;
-    float sw = (float)LW() / (float)tw;
+    SDL_Rect view;
+    reader_view_rect(&view);
+    float sw = (float)view.w / (float)tw;
+    float sh = (float)view.h / (float)th;
+    if (g_reader_source == READER_SRC_DOC && g_doc_page_fill_view) return sw > sh ? sw : sh;
+    if (g_reader_source == READER_SRC_DOC && !g_doc_reflowable) return sw;
     if (reader_page_is_tall(tw, th)) return sw;
-    float sh = (float)LH() / (float)th;
     return sw < sh ? sw : sh;
 }
 static void reader_clamp_pan(void) {
@@ -3065,8 +3597,10 @@ static void reader_clamp_pan(void) {
     float base = reader_base_scale(tw, th);
     float w = tw * base * rd_zoom;
     float h = th * base * rd_zoom;
-    float maxX = w > LW() ? (w - LW()) * 0.5f : 0.0f;
-    float maxY = h > LH() ? (h - LH()) * 0.5f : 0.0f;
+    SDL_Rect view;
+    reader_view_rect(&view);
+    float maxX = w > view.w ? (w - view.w) * 0.5f : 0.0f;
+    float maxY = h > view.h ? (h - view.h) * 0.5f : 0.0f;
     // Rola enquanto o eixo nao couber (vertical funciona mesmo sem zoom = webtoon).
     if (maxX <= 0.0f) rd_pan_x = 0.0f;
     else { if (rd_pan_x < -maxX) rd_pan_x = -maxX; if (rd_pan_x > maxX) rd_pan_x = maxX; }
@@ -3075,22 +3609,258 @@ static void reader_clamp_pan(void) {
 }
 
 static void reader_reset_view(void) {
-    rd_zoom = READER_ZOOM_MIN;
+    rd_zoom = reader_default_zoom();
     rd_pan_x = rd_pan_y = 0.0f;
-    // Tiras altas comecam no TOPO (em vez de centralizadas no meio da tira).
+    // Tiras altas e PDFs com zoom comecam no topo, nao no meio da pagina.
     int tw = 0, th = 0;
     if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
-    if (reader_page_is_tall(tw, th)) {
-        float h = th * reader_base_scale(tw, th);
-        if (h > LH()) rd_pan_y = (h - (float)LH()) * 0.5f;   // +maxY = topo
+    SDL_Rect view;
+    reader_view_rect(&view);
+    if (g_reader_source == READER_SRC_DOC && !g_doc_reflowable && g_doc_text_scale > 0 && tw > 0 && th > 0) {
+        float base = reader_base_scale(tw, th);
+        float h = (float)th * base * rd_zoom;
+        float minH = (float)view.h * 1.06f;
+        if (h < minH && base > 0.0f) {
+            rd_zoom = minH / ((float)th * base);
+            if (rd_zoom > READER_ZOOM_MAX) rd_zoom = READER_ZOOM_MAX;
+        }
+    }
+    if (reader_page_is_tall(tw, th) || g_reader_source == READER_SRC_DOC) {
+        float h = th * reader_base_scale(tw, th) * rd_zoom;
+        if (h > view.h) rd_pan_y = (h - (float)view.h) * 0.5f;   // +maxY = topo
     }
     reader_reset_touch();
     reader_show_overlay();
 }
 
+static int doc_engine_init(void) {
+    g_doc_ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
+    if (!g_doc_ctx) return 0;
+    fz_try(g_doc_ctx) {
+        fz_register_document_handlers(g_doc_ctx);
+    }
+    fz_catch(g_doc_ctx) {
+        fz_drop_context(g_doc_ctx);
+        g_doc_ctx = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+static void doc_free_page_texture(void) {
+    if (!g_doc_page_tex) return;
+    if (pageTex == g_doc_page_tex) {
+        pageTex = NULL;
+        pageTexPage = 0;
+    }
+    SDL_DestroyTexture(g_doc_page_tex);
+    g_doc_page_tex = NULL;
+}
+
+static void doc_close(void) {
+    doc_free_page_texture();
+    if (g_doc && g_doc_ctx) {
+        fz_drop_document(g_doc_ctx, g_doc);
+    }
+    g_doc = NULL;
+    g_doc_reflowable = 0;
+    g_doc_failed_page = 0;
+    g_doc_page_fill_view = 0;
+}
+
+static void doc_engine_exit(void) {
+    doc_close();
+    if (g_doc_ctx) {
+        fz_drop_context(g_doc_ctx);
+        g_doc_ctx = NULL;
+    }
+}
+
+static int doc_open_file(const char *path) {
+    if (!g_doc_ctx || !path || !path[0]) return 0;
+    doc_close();
+    int ok = 0;
+    fz_try(g_doc_ctx) {
+        g_doc = fz_open_document(g_doc_ctx, path);
+        g_doc_reflowable = fz_is_document_reflowable(g_doc_ctx, g_doc);
+        if (g_doc_reflowable) {
+            SDL_Rect view;
+            reader_view_rect(&view);
+            fz_layout_document(g_doc_ctx, g_doc, view.w, view.h, doc_epub_em());
+        }
+        pageCount = fz_count_pages(g_doc_ctx, g_doc);
+        ok = pageCount > 0;
+    }
+    fz_catch(g_doc_ctx) {
+        if (g_doc) {
+            fz_drop_document(g_doc_ctx, g_doc);
+            g_doc = NULL;
+        }
+        g_doc_reflowable = 0;
+        ok = 0;
+    }
+    if (!ok) {
+        doc_close();
+        pageCount = 1;
+        return 0;
+    }
+    if (curPage < 1) curPage = 1;
+    if (curPage > pageCount) curPage = pageCount;
+    g_doc_failed_page = 0;
+    pageTex = NULL;
+    pageTexPage = 0;
+    reader_pending_view_reset = 1;
+    return 1;
+}
+
+static int doc_render_current_page(void) {
+    if (!g_doc || !g_doc_ctx || g_reader_source != READER_SRC_DOC) return 0;
+    if (g_doc_page_tex && pageTexPage == curPage) {
+        pageTex = g_doc_page_tex;
+        return 1;
+    }
+    doc_free_page_texture();
+    g_doc_page_fill_view = 0;
+    if (curPage < 1) curPage = 1;
+    if (curPage > pageCount) curPage = pageCount;
+
+    fz_page *page = NULL;
+    fz_pixmap *pix = NULL;
+    int ok = 0;
+    fz_var(page);
+    fz_var(pix);
+    fz_try(g_doc_ctx) {
+        page = fz_load_page(g_doc_ctx, g_doc, curPage - 1);
+        fz_rect bounds = fz_bound_page(g_doc_ctx, page);
+        float pw = bounds.x1 - bounds.x0;
+        float ph = bounds.y1 - bounds.y0;
+        if (pw < 1.0f) pw = 1.0f;
+        if (ph < 1.0f) ph = 1.0f;
+        SDL_Rect view;
+        reader_view_rect(&view);
+        float sx = (float)view.w / pw;
+        float sy = (float)view.h / ph;
+        float fit = sx < sy ? sx : sy;
+        float ss = 2.0f;
+        float longFit = (pw > ph ? pw : ph) * fit;
+        if (longFit * ss > 2200.0f) ss = 2200.0f / longFit;
+        if (ss < 1.0f) ss = 1.0f;
+        pix = fz_new_pixmap_from_page(g_doc_ctx, page, fz_scale(fit * ss, fit * ss),
+                                      fz_device_rgb(g_doc_ctx), 0);
+        SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
+            pix->samples, pix->w, pix->h, 24, pix->stride, SDL_PIXELFORMAT_RGB24);
+        if (surf) {
+            SDL_Rect crop;
+            int fillView = 0;
+            int hasCrop = doc_compute_crop(pix, &crop, &fillView);
+            SDL_Surface *useSurf = surf;
+            SDL_Surface *cropSurf = NULL;
+            if (hasCrop && crop.w > 0 && crop.h > 0) {
+                cropSurf = SDL_CreateRGBSurfaceWithFormat(0, crop.w, crop.h, 24, SDL_PIXELFORMAT_RGB24);
+                if (cropSurf) {
+                    SDL_Rect dst = { 0, 0, crop.w, crop.h };
+                    SDL_BlitSurface(surf, &crop, cropSurf, &dst);
+                    useSurf = cropSurf;
+                }
+            }
+            g_doc_page_tex = SDL_CreateTextureFromSurface(gRen, useSurf);
+            if (cropSurf) SDL_FreeSurface(cropSurf);
+            SDL_FreeSurface(surf);
+            if (g_doc_page_tex) {
+                SDL_SetTextureScaleMode(g_doc_page_tex, SDL_ScaleModeLinear);
+                pageTex = g_doc_page_tex;
+                pageTexPage = curPage;
+                g_doc_page_fill_view = fillView;
+                g_doc_failed_page = 0;
+                ok = 1;
+            }
+        }
+    }
+    fz_always(g_doc_ctx) {
+        if (pix) fz_drop_pixmap(g_doc_ctx, pix);
+        if (page) fz_drop_page(g_doc_ctx, page);
+    }
+    fz_catch(g_doc_ctx) {
+        doc_free_page_texture();
+        g_doc_failed_page = 1;
+        ok = 0;
+    }
+    if (!ok) g_doc_failed_page = 1;
+    if (!ok) g_doc_page_fill_view = 0;
+    if (ok && reader_pending_view_reset) {
+        reader_pending_view_reset = 0;
+        reader_reset_view();
+    }
+    if (ok) reader_start_next_prompt();
+    return ok;
+}
+
+static void doc_on_orientation_changed(void) {
+    if (!g_doc || g_reader_source != READER_SRC_DOC) return;
+    if (g_doc_reflowable) {
+        fz_try(g_doc_ctx) {
+            SDL_Rect view;
+            reader_view_rect(&view);
+            fz_layout_document(g_doc_ctx, g_doc, view.w, view.h, doc_epub_em());
+            pageCount = fz_count_pages(g_doc_ctx, g_doc);
+        }
+        fz_catch(g_doc_ctx) {
+            g_doc_failed_page = 1;
+        }
+    }
+    if (pageCount < 1) pageCount = 1;
+    if (curPage > pageCount) curPage = pageCount;
+    if (curPage < 1) curPage = 1;
+    reader_pending_view_reset = 1;
+    doc_free_page_texture();
+    doc_render_current_page();
+}
+
+static void doc_cycle_text_size(void) {
+    if (g_reader_source != READER_SRC_DOC) return;
+    g_doc_text_scale = (g_doc_text_scale + 1) % DOC_TEXT_SCALE_COUNT;
+    if (!g_doc) {
+        reader_show_overlay();
+        return;
+    }
+    if (g_doc_reflowable) {
+        fz_try(g_doc_ctx) {
+            SDL_Rect view;
+            reader_view_rect(&view);
+            fz_layout_document(g_doc_ctx, g_doc, view.w, view.h, doc_epub_em());
+            pageCount = fz_count_pages(g_doc_ctx, g_doc);
+        }
+        fz_catch(g_doc_ctx) {
+            g_doc_failed_page = 1;
+        }
+    }
+    if (pageCount < 1) pageCount = 1;
+    if (curPage > pageCount) curPage = pageCount;
+    if (curPage < 1) curPage = 1;
+    reader_pending_view_reset = 1;
+    doc_free_page_texture();
+    doc_render_current_page();
+    store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
+    reader_show_overlay();
+}
+
+static void reader_leave(void) {
+    if (g_reader_source == READER_SRC_DOC) {
+        doc_close();
+    } else {
+        pageTex = NULL;
+        pageTexPage = 0;
+    }
+    next_prompt_started = 0;
+    next_prompt_cancelled = 0;
+    reader_reset_touch();
+}
+
 static void reader_page_rect(SDL_Rect *dst) {
     int tw = 0, th = 0;
-    dst->x = dst->y = 0; dst->w = LW(); dst->h = LH();
+    SDL_Rect view;
+    reader_view_rect(&view);
+    *dst = view;
     if (!pageTex) return;
     SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
     if (tw <= 0 || th <= 0) return;
@@ -3098,11 +3868,12 @@ static void reader_page_rect(SDL_Rect *dst) {
     int w = (int)(tw * scale * rd_zoom);
     int h = (int)(th * scale * rd_zoom);
     dst->w = w; dst->h = h;
-    dst->x = (LW() - w) / 2 + (int)rd_pan_x;
-    dst->y = (LH() - h) / 2 + (int)rd_pan_y;
+    dst->x = view.x + (view.w - w) / 2 + (int)rd_pan_x;
+    dst->y = view.y + (view.h - h) / 2 + (int)rd_pan_y;
 }
 
 static int reader_has_next_chapter(void) {
+    if (g_reader_source == READER_SRC_DOC) return 0;
     // curChapIndex e o indice REAL (nao invertido) no array JSON
     return g_ser && curChapIndex >= 0 && curChapIndex + 1 < chapCount;
 }
@@ -3129,6 +3900,7 @@ static void reader_open_page(int n, int atBottom) {
     reader_pending_view_reset = 1;
     next_prompt_started = 0;
     next_prompt_cancelled = 0;
+    if (g_reader_source == READER_SRC_DOC) g_doc_failed_page = 0;
     page_cache_request(curPage);
     page_cache_apply_current();
     page_cache_prefetch_around();
@@ -3144,10 +3916,15 @@ static void reader_advance(int dir) {
 static void reader_scroll_or_turn(int dir) {
     int tw = 0, th = 0;
     if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
-    if (reader_page_is_tall(tw, th) && rd_zoom <= READER_ZOOM_MIN + 0.01f) {
-        float h = th * reader_base_scale(tw, th);
-        float maxY = h > LH() ? (h - (float)LH()) * 0.5f : 0.0f;
-        float step = (float)LH() * 0.82f;
+    SDL_Rect view;
+    reader_view_rect(&view);
+    float h = th * reader_base_scale(tw, th) * rd_zoom;
+    float maxY = h > view.h ? (h - (float)view.h) * 0.5f : 0.0f;
+    int scrollable = maxY > 1.0f &&
+                     (reader_page_is_tall(tw, th) || g_reader_source == READER_SRC_DOC ||
+                      rd_zoom > reader_default_zoom() + 0.01f);
+    if (scrollable) {
+        float step = (float)view.h * 0.82f;
         if (dir > 0 && rd_pan_y > -maxY + 1.0f) {        // descer na tira
             rd_pan_y -= step; reader_clamp_pan(); reader_show_overlay(); return;
         }
@@ -3235,9 +4012,12 @@ static void render_series(void) {
 
     if (catCount == 0) {
         if (g_offline_mode) draw_empty_state("Biblioteca online indisponivel", "Sem internet, use Continuar lendo para abrir o que ja foi salvo.");
-        else if (catalogLoadFailed) draw_empty_state("Favoritos ainda nao conectados", "Atualize o Meruem web para liberar /switch/favorites.");
+        else if (catalogLoadFailed && catalogFavorites) draw_empty_state("Favoritos ainda nao conectados", "Atualize o Meruem web para liberar /switch/favorites.");
+        else if (catalogLoadFailed) draw_empty_state("Nao consegui carregar o acervo", "Verifique internet/login e tente novamente.");
         else if (catalogFavorites) draw_empty_state("Nenhum favorito ainda", "Favorite obras no site Meruem. Depois elas aparecem aqui no Switch.");
-        else draw_empty_state("Nada encontrado", "Tente outra busca ou troque a area.");
+        else if (g_search[0] && areaIdx == AREA_BOOKS) draw_empty_state("Nada encontrado em Livros", "Tente menos palavras, outra grafia ou X para limpar a busca.");
+        else if (g_search[0]) draw_empty_state("Nada encontrado", "Tente outra busca ou X para limpar e voltar ao acervo.");
+        else draw_empty_state("Nada encontrado", "Troque a area ou tente buscar por outro nome.");
     } else if (catViewMode == 0) {
         int cols = grid_cols(), gap = grid_gap();
         int cardW = grid_card_w(), coverH = grid_cover_h(), cellH = grid_cell_h();
@@ -3255,7 +4035,7 @@ static void render_series(void) {
                 SDL_Texture *cover = series_cover_texture(s);
                 if (cover) draw_cover_texture(cover, x, y, cardW, coverH);
                 else       draw_cover_placeholder(x, y, cardW, coverH, title);
-                draw_offline_badge(x + cardW - 52, y + 6, store_get_series_offline(json_str(s, "id", "")));
+                if (areaIdx != AREA_BOOKS) draw_offline_badge(x + cardW - 52, y + 6, store_get_series_offline(json_str(s, "id", "")));
                 char t[40];
                 snprintf(t, sizeof(t), "%.16s", title);
                 text_draw_fit(gRen, t, x, y + coverH + 5, cardW, idx == catSel ? COL_SEL : COL_SOFT, 0);
@@ -3278,7 +4058,7 @@ static void render_series(void) {
             char row[320];
             snprintf(row, sizeof(row), "%.48s", title);
             text_draw_fit(gRen, row, 24, y + 22, LW() - 116, idx == catSel ? COL_SEL : COL_TEXT, 0);
-            draw_offline_badge(LW() - 74, y + 16, store_get_series_offline(json_str(s, "id", "")));
+            if (areaIdx != AREA_BOOKS) draw_offline_badge(LW() - 74, y + 16, store_get_series_offline(json_str(s, "id", "")));
         }
         shownStart = catScroll + 1;
         shownEnd = catScroll + vis;
@@ -3287,8 +4067,11 @@ static void render_series(void) {
         draw_more_hint(catScroll, catCount, vis);
     }
     if (!catalogFavorites) draw_area_hint_line();
-    draw_footer(catalogFavorites ? "B/Biblioteca: voltar    Favoritos vem do site Meruem    X: alternar visual" : NULL);
-    btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search()); btn_draw(btn_view_mode()); btn_draw(btn_next());
+    draw_footer(catalogFavorites ? "B/Biblioteca: voltar    Favoritos vem do site Meruem    X: alternar visual" :
+                (g_search[0] ? "Busca ativa: X ou B limpa a busca    Buscar tenta outro termo" : NULL));
+    btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search());
+    btn_draw(g_search[0] ? btn_clear_search() : btn_view_mode());
+    btn_draw(btn_next());
 }
 
 static void render_settings(void) {
@@ -3323,20 +4106,22 @@ static void render_settings(void) {
     } else {
         text_draw_fit(gRen, "Sincronizando conta com o Meruem web...", box.x + 24, box.y + 204, boxTextW, COL_DIM, 0);
     }
-    SDL_Rect localBox = { 28, box.y + box.h + 12, LW() - 56, g_portrait ? 126 : 92 };
+    SDL_Rect localBox = { 28, box.y + box.h + 12, LW() - 56, g_portrait ? 150 : 116 };
     SDL_SetRenderDrawColor(gRen, 22, 30, 46, 232);
     SDL_RenderFillRect(gRen, &localBox);
     SDL_SetRenderDrawColor(gRen, 96, 154, 232, 180);
     SDL_RenderDrawRect(gRen, &localBox);
     int localTextW = localBox.w - 48;
-    text_draw_fit(gRen, "Leitura local", localBox.x + 24, localBox.y + 18, localTextW, COL_HEAD, 1);
+    text_draw_fit(gRen, "Leitura local", localBox.x + 24, localBox.y + 16, localTextW, COL_HEAD, 1);
     char shortPath[160];
     path_short(g_local_root, shortPath, sizeof(shortPath));
-    snprintf(line, sizeof(line), "Pasta: %s", shortPath);
-    text_draw_fit(gRen, line, localBox.x + 24, localBox.y + 52, localTextW, COL_SEL, 0);
+    snprintf(line, sizeof(line), "Mangas locais: %s", shortPath);
+    text_draw_fit(gRen, line, localBox.x + 24, localBox.y + 50, localTextW, COL_SEL, 0);
     if (g_portrait) {
-        text_draw_fit(gRen, "Padrao: sdmc:/Mangas", localBox.x + 24, localBox.y + 82, localTextW, COL_SOFT, 0);
-        text_draw_fit(gRen, "CBZ ou pastas com imagens.", localBox.x + 24, localBox.y + 106, localTextW, COL_DIM, 0);
+        text_draw_fit(gRen, "Livros do dispositivo: sdmc:/Livros", localBox.x + 24, localBox.y + 82, localTextW, COL_SOFT, 0);
+        text_draw_fit(gRen, "Use Area > Local para abrir arquivos do SD.", localBox.x + 24, localBox.y + 114, localTextW, COL_DIM, 0);
+    } else {
+        text_draw_fit(gRen, "Livros: sdmc:/Livros  |  Area > Local", localBox.x + 24, localBox.y + 82, localTextW, COL_SOFT, 0);
     }
     btn_draw(btn_switch_account());
     btn_draw(btn_pick_local());
@@ -3347,13 +4132,15 @@ static void render_settings(void) {
 static void render_chapters(void) {
     draw_background();
     char hd[200];
+    int isBooks = areaIdx == AREA_BOOKS;
     snprintf(hd, sizeof(hd), "%.20s (%d)", curSeriesTitle, chapCount);
     Btn orderBtn = btn_chap_order();
     draw_topbar_reserved(hd, btn_back(), orderBtn.x);
     btn_draw(orderBtn);
 
     int vis = visible_rows();
-    if (chapCount == 0) draw_empty_state("Sem capitulos", "Esta serie nao retornou capitulos.");
+    if (chapCount == 0) draw_empty_state(isBooks ? "Sem livros" : "Sem capitulos",
+                                         isBooks ? "Esta obra nao retornou PDF/EPUB suportado." : "Esta serie nao retornou capitulos.");
     for (int i = 0; i < vis; i++) {
         int idx = chapScroll + i;
         if (idx >= chapCount) break;
@@ -3365,25 +4152,43 @@ static void render_chapters(void) {
         const char *bid = json_str(c, "id", "");
         int prog = store_get_progress(bid);
         int pages = json_int(c, "pages", 0);
-        int off = offline_count_pages(bid, pages);
         char row[320];
         char meta[160];
-        snprintf(row, sizeof(row), "#%s  %.40s", num, tt[0] ? tt : "Capitulo");
-        if (off > 0) snprintf(meta, sizeof(meta), "%d paginas  offline %d/%d%s", pages, off, pages, prog > 1 ? "  em andamento" : "");
-        else         snprintf(meta, sizeof(meta), "%d paginas%s", pages, prog > 1 ? "  em andamento" : "");
+        if (isBooks) {
+            char size[40] = "";
+            unsigned long long bytes = json_ull(c, "sizeBytes", 0);
+            if (bytes > 0) format_bytes(bytes, size, sizeof(size));
+            if (num[0] && strcmp(num, "?") != 0) snprintf(row, sizeof(row), "#%s  %.40s", num, tt[0] ? tt : "Livro");
+            else snprintf(row, sizeof(row), "%.48s", tt[0] ? tt : "Livro");
+            if (pages > 0 && size[0]) snprintf(meta, sizeof(meta), "%s  %d paginas  %s", json_str(c, "format", "pdf"), pages, size);
+            else if (pages > 0) snprintf(meta, sizeof(meta), "%s  %d paginas", json_str(c, "format", "pdf"), pages);
+            else if (size[0]) snprintf(meta, sizeof(meta), "%s  %s", json_str(c, "format", "pdf"), size);
+            else snprintf(meta, sizeof(meta), "%s", json_str(c, "format", "pdf"));
+            if (prog > 1) {
+                size_t m = strlen(meta);
+                snprintf(meta + m, sizeof(meta) - m, "  em andamento");
+            }
+        } else {
+            int off = offline_count_pages(bid, pages);
+            snprintf(row, sizeof(row), "#%s  %.40s", num, tt[0] ? tt : "Capitulo");
+            if (off > 0) snprintf(meta, sizeof(meta), "%d paginas  offline %d/%d%s", pages, off, pages, prog > 1 ? "  em andamento" : "");
+            else         snprintf(meta, sizeof(meta), "%d paginas%s", pages, prog > 1 ? "  em andamento" : "");
+        }
         text_draw_fit(gRen, row, 24, y + 8, LW() - 56, idx == chapSel ? COL_SEL : COL_TEXT, 0);
         text_draw_fit(gRen, meta, 24, y + 34, LW() - 56, COL_SOFT, 0);
     }
     draw_scrollbar(chapScroll, chapCount, vis);
     draw_footer(NULL);
-    btn_draw(btn_download_all());
-    {
+    if (!isBooks) {
+        btn_draw(btn_download_all());
         int soff = store_get_series_offline(curSeriesId);
         const char *hint = soff == 2 ? "Serie ja baixada (X = rebaixar)   B: voltar"
                          : soff == 1 ? "X = completar download   B: voltar"
                                      : "X = baixar tudo offline   B: voltar";
         text_draw_fit(gRen, hint, btn_download_all().x + btn_download_all().w + 16, LH() - 41,
                       LW() - (btn_download_all().x + btn_download_all().w + 32), COL_DIM, 0);
+    } else {
+        text_draw_fit(gRen, "A: baixar/ler livro   Y: inverter ordem   B: voltar", 18, LH() - 41, LW() - 36, COL_DIM, 0);
     }
     btn_draw(btn_up()); btn_draw(btn_down());
 }
@@ -3413,11 +4218,14 @@ static void render_continue(void) {
         char row[360];
         char meta[160];
         int pct = pages > 0 ? (page * 100) / pages : 0;
-        int local = is_local_id(contIds[idx]) || is_local_base(pb) || is_cbz_base(pb);
+        int doc = is_doc_base(pb);
+        int local = is_local_id(contIds[idx]) || is_local_base(pb) || is_cbz_base(pb) || doc;
         int off = local ? 0 : offline_count_pages(contIds[idx], pages);
         if (pct > 100) pct = 100;
         snprintf(row, sizeof(row), "%.34s", st[0] ? st : "(serie)");
-        if (local) snprintf(meta, sizeof(meta), "%s  pagina %d/%d  Local", cl, page, pages);
+        if (doc && is_local_id(contIds[idx])) snprintf(meta, sizeof(meta), "%s  pagina %d/%d  Livro local", cl, page, pages);
+        else if (doc) snprintf(meta, sizeof(meta), "%s  pagina %d/%d  Livro salvo", cl, page, pages);
+        else if (local) snprintf(meta, sizeof(meta), "%s  pagina %d/%d  Local", cl, page, pages);
         else if (off > 0) snprintf(meta, sizeof(meta), "%s  pagina %d/%d  offline %d/%d", cl, page, pages, off, pages);
         else         snprintf(meta, sizeof(meta), "%s  pagina %d/%d  %d%%", cl, page, pages, pct);
         SDL_Texture *cover = cover_texture_for_key(contIds[idx], cv);
@@ -3486,7 +4294,7 @@ static void render_local_browser(void) {
     if (localLoadFailed) {
         draw_empty_state("Pasta local nao encontrada", "Entre em Conta e escolha outra pasta do SD.");
     } else if (localN == 0) {
-        draw_empty_state("Nada local por aqui", localStatus[0] ? localStatus : "Use CBZ ou pastas com imagens.");
+        draw_empty_state("Nada local por aqui", localStatus[0] ? localStatus : "Use CBZ, PDF/EPUB ou pastas com imagens.");
     }
     for (int i = 0; i < vis; i++) {
         int idx = localScroll + i;
@@ -3498,10 +4306,11 @@ static void render_local_browser(void) {
         format_bytes(it->size, size, sizeof(size));
         snprintf(row, sizeof(row), "%.46s", it->name);
         if (it->isCbz) snprintf(meta, sizeof(meta), "CBZ  %d paginas  %s  A: ler", it->cbzPages, size);
+        else if (it->isDoc) snprintf(meta, sizeof(meta), "%s  %s  A: ler", doc_format_from_path(it->path), size);
         else if (it->imageCount > 0 && it->dirCount > 0) snprintf(meta, sizeof(meta), "%d imagens  %d pastas  %s", it->imageCount, it->dirCount, size);
         else if (it->imageCount > 0) snprintf(meta, sizeof(meta), "%d imagens  %s  A: ler", it->imageCount, size);
-        else if (it->cbzCount > 0 && it->dirCount > 0) snprintf(meta, sizeof(meta), "%d CBZ  %d pastas  %s", it->cbzCount, it->dirCount, size);
-        else if (it->cbzCount > 0) snprintf(meta, sizeof(meta), "%d CBZ  %s", it->cbzCount, size);
+        else if ((it->cbzCount > 0 || it->docCount > 0) && it->dirCount > 0) snprintf(meta, sizeof(meta), "%d CBZ  %d livros  %d pastas  %s", it->cbzCount, it->docCount, it->dirCount, size);
+        else if (it->cbzCount > 0 || it->docCount > 0) snprintf(meta, sizeof(meta), "%d CBZ  %d livros  %s", it->cbzCount, it->docCount, size);
         else snprintf(meta, sizeof(meta), "%d pastas", it->dirCount);
         text_draw_fit(gRen, row, 24, y + 9, LW() - 56, idx == localSel ? COL_SEL : COL_TEXT, 0);
         text_draw_fit(gRen, meta, 24, y + 38, LW() - 56, COL_SOFT, 0);
@@ -3513,7 +4322,7 @@ static void render_local_browser(void) {
     draw_footer(NULL);
     btn_draw(btn_area());
     btn_draw(btn_search());
-    text_draw_fit(gRen, "A ler  Y pasta  X local  B voltar", btn_search().x + btn_search().w + 16, LH() - 41,
+    text_draw_fit(gRen, "A ler/entrar  Y pasta  X local  B voltar", btn_search().x + btn_search().w + 16, LH() - 41,
                   LW() - (btn_search().x + btn_search().w + 32), COL_DIM, 0);
 }
 
@@ -3537,9 +4346,7 @@ static void render_local_picker(void) {
         draw_row_shell(y, idx == localSel);
         format_bytes(it->size, size, sizeof(size));
         snprintf(row, sizeof(row), "%.48s", it->name);
-        if (it->imageCount > 0 && it->cbzCount > 0) snprintf(meta, sizeof(meta), "%d imagens  %d CBZ  %d pastas", it->imageCount, it->cbzCount, it->dirCount);
-        else if (it->imageCount > 0) snprintf(meta, sizeof(meta), "%d imagens  %d pastas  %s", it->imageCount, it->dirCount, size);
-        else if (it->cbzCount > 0) snprintf(meta, sizeof(meta), "%d CBZ  %d pastas  %s", it->cbzCount, it->dirCount, size);
+        if (it->imageCount > 0 || it->cbzCount > 0 || it->docCount > 0) snprintf(meta, sizeof(meta), "%d imagens  %d CBZ  %d livros  %d pastas  %s", it->imageCount, it->cbzCount, it->docCount, it->dirCount, size);
         else snprintf(meta, sizeof(meta), "%d pastas", it->dirCount);
         text_draw_fit(gRen, row, 24, y + 9, LW() - 56, idx == localSel ? COL_SEL : COL_TEXT, 0);
         text_draw_fit(gRen, meta, 24, y + 38, LW() - 56, COL_SOFT, 0);
@@ -3583,7 +4390,10 @@ static void render_reader(void) {
         SDL_SetRenderDrawColor(gRen, failed ? 238 : 96, failed ? 92 : 154, failed ? 92 : 232, 235);
         SDL_RenderDrawRect(gRen, &r);
         if (failed) {
-            if (g_reader_source == READER_SRC_LOCAL) {
+            if (g_reader_source == READER_SRC_DOC) {
+                snprintf(title, sizeof(title), "Nao consegui renderizar esta pagina");
+                snprintf(line, sizeof(line), "O arquivo pode estar corrompido ou pesado demais para esta pagina.");
+            } else if (g_reader_source == READER_SRC_LOCAL) {
                 snprintf(title, sizeof(title), "Arquivo local invalido");
                 snprintf(line, sizeof(line), "Imagem corrompida, grande demais ou removida do SD.");
             } else {
@@ -3609,9 +4419,12 @@ static void render_reader(void) {
         SDL_RenderFillRect(gRen, &bar);
         btn_draw(btn_back());
         if (g_reader_source == READER_SRC_REMOTE) btn_draw(btn_offline());
+        if (g_reader_source == READER_SRC_DOC) btn_draw(btn_doc_text());
         btn_draw(btn_rotate());
         char pc[160];
-        int maxPcW = (g_reader_source == READER_SRC_REMOTE ? btn_offline().x : btn_rotate().x) - (btn_back().x + btn_back().w + 24);
+        int rightX = g_reader_source == READER_SRC_REMOTE ? btn_offline().x :
+                     (g_reader_source == READER_SRC_DOC ? btn_doc_text().x : btn_rotate().x);
+        int maxPcW = rightX - (btn_back().x + btn_back().w + 24);
         snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
         text_draw_fit(gRen, pc, btn_back().x + btn_back().w + 14, 12, maxPcW, COL_SEL, 0);
         (void)maxPcW;
@@ -3620,6 +4433,8 @@ static void render_reader(void) {
             char st[80];
             snprintf(st, sizeof(st), "X: offline  %d/%d no SD", off, pageCount);
             text_draw_fit(gRen, st, 18, LH() - 48, LW() - 36, off == pageCount ? COL_HEAD : COL_DIM, 0);
+        } else if (g_reader_source == READER_SRC_DOC) {
+            // Em livros, nao desenhamos legenda inferior para nao cobrir texto.
         } else {
             text_draw_fit(gRen, "Local: lendo direto do SD", 18, LH() - 48, LW() - 36, COL_DIM, 0);
         }
@@ -3656,12 +4471,22 @@ static void render_reader(void) {
 static int local_can_go_parent(const char *cwd, const char *root) {
     if (!cwd || !root) return 0;
     if (!strcmp(cwd, "sdmc:/")) return 0;
+    if (!strcmp(cwd, LOCAL_BOOKS_DEFAULT) && strcmp(root, LOCAL_BOOKS_DEFAULT) != 0) return 1;
+    size_t booksLen = strlen(LOCAL_BOOKS_DEFAULT);
+    if (strncmp(cwd, LOCAL_BOOKS_DEFAULT, booksLen) == 0 &&
+        (cwd[booksLen] == '/' || cwd[booksLen] == '\0')) {
+        return strcmp(cwd, LOCAL_BOOKS_DEFAULT) != 0;
+    }
     return strcmp(cwd, root) != 0;
 }
 
 static void local_go_parent(void) {
     char parent[LOCAL_PATH_MAX];
     if (!local_can_go_parent(g_local_cwd, g_local_root)) return;
+    if (!strcmp(g_local_cwd, LOCAL_BOOKS_DEFAULT) && strcmp(g_local_root, LOCAL_BOOKS_DEFAULT) != 0) {
+        load_local_browser(local_start_path());
+        return;
+    }
     path_parent(g_local_cwd, parent, sizeof(parent));
     load_local_browser(parent);
 }
@@ -3673,6 +4498,12 @@ static void local_open_selected(int enterOnly) {
         char parent[LOCAL_PATH_MAX];
         path_parent(it->path, parent, sizeof(parent));
         enter_local_reader_from_cbz(it->path, path_basename(parent)[0] ? path_basename(parent) : "Local", it->name, SC_LOCAL);
+        return;
+    }
+    if (it->isDoc) {
+        char parent[LOCAL_PATH_MAX];
+        path_parent(it->path, parent, sizeof(parent));
+        enter_local_reader_from_doc(it->path, path_basename(parent)[0] ? path_basename(parent) : "Local", it->name, SC_LOCAL);
         return;
     }
     if (!enterOnly && it->imageCount > 0) {
@@ -3705,8 +4536,9 @@ static void picker_use_current(void) {
     }
     local_root_save(g_picker_cwd);
     success_screen("Pasta local definida.", "Abra a area Local para ler.");
-    load_local_browser(g_local_root);
+    load_local_browser(local_start_path());
     areaIdx = AREA_LOCAL;
+    save_current_area();
     screen = SC_LOCAL;
 }
 
@@ -3730,10 +4562,11 @@ static void handle_tap(int lx, int ly) {
         if (btn_hit(btn_prev(), lx, ly)) { if (catPage > 0) { catPage--; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } return; }
         if (btn_hit(btn_next(), lx, ly)) { if (catPage < catTotal - 1) { catPage++; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } return; }
         if (btn_hit(btn_area(), lx, ly)) { g_search[0] = '\0'; switch_area_next(); return; }
-        if (btn_hit(btn_view_mode(), lx, ly)) { toggle_catalog_view(); return; }
+        if (g_search[0] && btn_hit(btn_clear_search(), lx, ly)) { clear_catalog_search(); return; }
+        if (!g_search[0] && btn_hit(btn_view_mode(), lx, ly)) { toggle_catalog_view(); return; }
         if (btn_hit(btn_search(), lx, ly)) {
             char term[96] = {0};
-            int rs = prompt_text("Buscar serie (vazio = limpar)", term, sizeof(term), 0);
+            int rs = prompt_text(catalog_search_guide(), term, sizeof(term), 0);
             if (rs != -1) { snprintf(g_search, sizeof(g_search), "%s", rs == 0 ? term : ""); catPage = 0; catSel = 0; load_catalog(); }
             return;
         }
@@ -3762,8 +4595,9 @@ static void handle_tap(int lx, int ly) {
         }
         if (btn_hit(btn_default_local(), lx, ly)) {
             mkdir(LOCAL_ROOT_DEFAULT, 0777);
+            mkdir(LOCAL_BOOKS_DEFAULT, 0777);
             local_root_save(LOCAL_ROOT_DEFAULT);
-            success_screen("Pasta padrao definida.", "Coloque seus CBZ em sdmc:/Mangas.");
+            success_screen("Pastas padrao definidas.", "Mangas: sdmc:/Mangas  Livros: sdmc:/Livros");
             return;
         }
         if (btn_hit(btn_switch_account(), lx, ly)) {
@@ -3776,7 +4610,7 @@ static void handle_tap(int lx, int ly) {
         }
     } else if (screen == SC_CHAPTERS) {
         if (btn_hit(btn_back(), lx, ly)) { screen = g_chapters_back; return; }
-        if (btn_hit(btn_download_all(), lx, ly)) { offline_download_all_chapters(); return; }
+        if (areaIdx != AREA_BOOKS && btn_hit(btn_download_all(), lx, ly)) { offline_download_all_chapters(); return; }
         if (btn_hit(btn_chap_order(), lx, ly)) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; return; }
         if (btn_hit(btn_up(), lx, ly))   { chapScroll -= visible_rows(); if (chapScroll < 0) chapScroll = 0; return; }
         if (btn_hit(btn_down(), lx, ly)) {
@@ -3791,9 +4625,9 @@ static void handle_tap(int lx, int ly) {
             if (idx >= 0 && idx < chapCount) { chapSel = idx; enter_reader(idx); }
         }
     } else if (screen == SC_CONTINUE) {
-        if (btn_hit(btn_library(), lx, ly)) { screen = SC_SERIES; return; }
-        if (btn_hit(btn_downloads(), lx, ly)) { areaIdx = AREA_DOWNLOADED; g_offline_back = SC_CONTINUE; load_offline_manager(); screen = SC_OFFLINE; return; }
-        if (btn_hit(btn_local_top(), lx, ly)) { areaIdx = AREA_LOCAL; g_local_back = SC_CONTINUE; load_local_browser(g_local_root); screen = SC_LOCAL; return; }
+        if (btn_hit(btn_library(), lx, ly)) { switch_area_to(areaIdx); return; }
+        if (btn_hit(btn_downloads(), lx, ly)) { areaIdx = AREA_DOWNLOADED; save_current_area(); g_offline_back = SC_CONTINUE; load_offline_manager(); screen = SC_OFFLINE; return; }
+        if (btn_hit(btn_local_top(), lx, ly)) { areaIdx = AREA_LOCAL; save_current_area(); g_local_back = SC_CONTINUE; load_local_browser(local_start_path()); screen = SC_LOCAL; return; }
         if (ly >= LIST_Y && ly < LIST_Y + visible_rows() * ROW_H) {
             int idx = contScroll + (ly - LIST_Y) / ROW_H;
             if (idx >= 0 && idx < contN) { contSel = idx; enter_reader_from_record(contIds[idx]); }
@@ -3840,12 +4674,13 @@ static void handle_tap(int lx, int ly) {
         }
         int overlay = SDL_GetTicks() < reader_overlay_until;
         if (overlay && ly < TB) {
-            if (btn_hit(btn_back(), lx, ly)) { pageTex = NULL; pageTexPage = 0; screen = g_reader_back; return; }
-            if (btn_hit(btn_offline(), lx, ly)) { if (g_reader_source == READER_SRC_REMOTE) offline_download_current_chapter(); return; }
+            if (btn_hit(btn_back(), lx, ly)) { reader_leave(); screen = g_reader_back; return; }
+            if (g_reader_source == READER_SRC_REMOTE && btn_hit(btn_offline(), lx, ly)) { offline_download_current_chapter(); return; }
+            if (g_reader_source == READER_SRC_DOC && btn_hit(btn_doc_text(), lx, ly)) { doc_cycle_text_size(); return; }
             if (btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); reader_clamp_pan(); reader_show_overlay(); return; }
             return;
         }
-        if (rd_zoom <= READER_ZOOM_MIN + 0.01f) {
+        if (rd_zoom <= reader_default_zoom() + 0.01f || g_reader_source == READER_SRC_DOC) {
             if (lx < LW() * 34 / 100) { reader_scroll_or_turn(-1); return; }
             if (lx > LW() * 66 / 100) { reader_scroll_or_turn(1); return; }
         }
@@ -3927,7 +4762,7 @@ static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
         int ptw = 0, pth = 0;
         if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &ptw, &pth);
         // Arrasta com 1 dedo quando ha zoom OU quando a pagina e alta (rola a tira).
-        if (rd_zoom > READER_ZOOM_MIN + 0.01f || reader_page_is_tall(ptw, pth)) {
+        if (rd_zoom > reader_default_zoom() + 0.01f || reader_page_is_tall(ptw, pth) || g_reader_source == READER_SRC_DOC) {
             rd_pan_x += dx;
             rd_pan_y += dy;
             reader_clamp_pan();
@@ -3937,21 +4772,25 @@ static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
 
 // Toque duplo: alterna entre 1x e ~2.2x, centralizando no ponto tocado.
 static void reader_double_tap_zoom(int lx, int ly) {
-    if (rd_zoom > READER_ZOOM_MIN + 0.01f) {
-        rd_zoom = READER_ZOOM_MIN;
+    float baseZoom = reader_default_zoom();
+    if (rd_zoom > baseZoom + 0.01f) {
+        rd_zoom = baseZoom;
         rd_pan_x = 0.0f;
         // Tira alta continua rolavel: mantem a posicao vertical (so reclampa depois).
         int tw = 0, th = 0;
         if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
         if (!reader_page_is_tall(tw, th)) rd_pan_y = 0.0f;
     } else {
-        float target = 2.2f;
+        float target = baseZoom * 1.72f;
+        if (target < 2.2f) target = 2.2f;
         if (target > READER_ZOOM_MAX) target = READER_ZOOM_MAX;
         // Zoom mantendo o ponto tocado fixo, considerando o scroll atual (tira alta).
         // k = escala nova / escala atual; reduz a (lx-centro)*(1-target) quando pan=0.
         float k = rd_zoom > 0.0f ? target / rd_zoom : target;
-        rd_pan_x = (lx - LW() / 2.0f) * (1.0f - k) + k * rd_pan_x;
-        rd_pan_y = (ly - LH() / 2.0f) * (1.0f - k) + k * rd_pan_y;
+        SDL_Rect view;
+        reader_view_rect(&view);
+        rd_pan_x = (lx - (view.x + view.w / 2.0f)) * (1.0f - k) + k * rd_pan_x;
+        rd_pan_y = (ly - (view.y + view.h / 2.0f)) * (1.0f - k) + k * rd_pan_y;
         rd_zoom = target;
     }
     reader_clamp_pan();
@@ -3971,11 +4810,11 @@ static void reader_touch_end(SDL_FingerID id, float nx, float ny) {
     if (reader_touch_count() == 0) {
         if (!wasPinching) {
             int adx = abs(dx), ady = abs(dy);
-            if (rd_zoom <= READER_ZOOM_MIN + 0.01f && adx > 70 && adx > ady + 30) {
+            if ((rd_zoom <= reader_default_zoom() + 0.01f || g_reader_source == READER_SRC_DOC) && adx > 70 && adx > ady + 30) {
                 reader_scroll_or_turn(dx < 0 ? 1 : -1);
             } else if (readerSwipeMoved <= TAP_THRESH) {
                 Uint32 now = SDL_GetTicks();
-                int zoomed = rd_zoom > READER_ZOOM_MIN + 0.01f;
+                int zoomed = rd_zoom > reader_default_zoom() + 0.01f;
                 int centerZone = (lx > LW() * 34 / 100 && lx < LW() * 66 / 100);
                 int isDouble = (now - rd_lastTapTime < 320) &&
                                (abs(lx - rd_lastTapX) < 80) && (abs(ly - rd_lastTapY) < 80);
@@ -4092,6 +4931,7 @@ int main(int argc, char **argv) {
     update_resolve_target_path((argc > 0 && argv) ? argv[0] : NULL, g_self_path, sizeof(g_self_path));
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
+    srand((unsigned)time(NULL) ^ (unsigned)SDL_GetTicks());
     IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG | IMG_INIT_WEBP);
     // Filtro linear: ao reduzir paginas grandes de manga, suaviza em vez de
     // serrar (nearest). Melhora muito a leitura do texto. Setar ANTES das texturas.
@@ -4104,6 +4944,8 @@ int main(int argc, char **argv) {
     SDL_JoystickOpen(0);
 
     int text_ok = (text_init() == 0);
+    int doc_ok = doc_engine_init();
+    (void)doc_ok;
     ensure_canvas();
     present_color(20, 20, 40);
 
@@ -4118,25 +4960,62 @@ int main(int argc, char **argv) {
     } else {
         curl_ok = 1;
         store_init();
+        books_ensure_dir();
         local_root_load_config();
         if (configure_server() && authenticate()) {
             if (!g_offline_mode && maybe_install_update()) goto cleanup;
+            char lastAreaKey[32] = {0};
+            int savedArea = AREA_MANGA;
+            if (store_load_last_area(lastAreaKey, sizeof(lastAreaKey))) savedArea = area_from_storage_key(lastAreaKey);
+            areaIdx = savedArea;
             load_continue();
             if (g_offline_mode) {
                 load_offline_manager();
-                if (contN > 0) screen = SC_CONTINUE;
-                else if (offlineN > 0) { areaIdx = AREA_DOWNLOADED; g_offline_back = SC_CONTINUE; screen = SC_OFFLINE; }
-                else if (local_root_has_visible_content(g_local_root)) {
+                if (savedArea == AREA_DOWNLOADED) {
+                    areaIdx = AREA_DOWNLOADED;
+                    g_offline_back = SC_CONTINUE;
+                    screen = SC_OFFLINE;
+                } else if (savedArea == AREA_LOCAL && local_root_has_visible_content(g_local_root)) {
                     areaIdx = AREA_LOCAL;
                     g_local_back = SC_CONTINUE;
-                    load_local_browser(g_local_root);
+                    load_local_browser(local_start_path());
+                    screen = SC_LOCAL;
+                } else if (contN > 0) {
+                    screen = SC_CONTINUE;
+                } else if (offlineN > 0) {
+                    areaIdx = AREA_DOWNLOADED;
+                    g_offline_back = SC_CONTINUE;
+                    screen = SC_OFFLINE;
+                } else if (local_root_has_visible_content(g_local_root)) {
+                    areaIdx = AREA_LOCAL;
+                    g_local_back = SC_CONTINUE;
+                    load_local_browser(local_start_path());
                     screen = SC_LOCAL;
                 } else {
                     screen = SC_CONTINUE;
                 }
             } else {
-                load_catalog();
-                screen = contN > 0 ? SC_CONTINUE : SC_SERIES;
+                if (savedArea == AREA_DOWNLOADED) {
+                    areaIdx = AREA_DOWNLOADED;
+                    g_offline_back = SC_CONTINUE;
+                    load_offline_manager();
+                    screen = SC_OFFLINE;
+                } else if (savedArea == AREA_LOCAL) {
+                    if (local_root_has_visible_content(g_local_root)) {
+                        areaIdx = AREA_LOCAL;
+                        g_local_back = SC_CONTINUE;
+                        load_local_browser(local_start_path());
+                        screen = SC_LOCAL;
+                    } else {
+                        areaIdx = AREA_MANGA;
+                        load_catalog();
+                        screen = contN > 0 ? SC_CONTINUE : SC_SERIES;
+                    }
+                } else {
+                    areaIdx = savedArea;
+                    load_catalog();
+                    screen = SC_SERIES;
+                }
             }
             int running = 1;
             running_ptr = &running;
@@ -4198,9 +5077,16 @@ int main(int argc, char **argv) {
                             else if (b == JOY_L) { if (catPage > 0) { catPage--; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } }
                             else if (b == JOY_R) { if (catPage < catTotal - 1) { catPage++; catSel = 0; if (catalogFavorites) load_favorites(); else load_catalog(); } }
                             else if (b == JOY_Y) { g_search[0] = '\0'; switch_area_next(); }
-                            else if (b == JOY_X) { toggle_catalog_view(); }
+                            else if (b == JOY_X) {
+                                if (g_search[0]) clear_catalog_search();
+                                else toggle_catalog_view();
+                            }
                             else if (b == JOY_MINUS) { store_clear_token(); if (g_token) { free(g_token); g_token = NULL; } if (!authenticate()) { running = 0; break; } catPage = 0; catSel = 0; load_catalog(); }
-                            else if (b == JOY_B) { if (catalogFavorites) return_to_library(); else { load_continue(); screen = SC_CONTINUE; } }
+                            else if (b == JOY_B) {
+                                if (g_search[0] && !catalogFavorites) clear_catalog_search();
+                                else if (catalogFavorites) return_to_library();
+                                else { load_continue(); screen = SC_CONTINUE; }
+                            }
                             else if (b == JOY_A && catCount > 0) enter_series(catSel);
                             clamp_catalog_scroll_to_selection();
                         } else if (screen == SC_CHAPTERS) {
@@ -4209,7 +5095,7 @@ int main(int argc, char **argv) {
                             else if (b == JOY_L) { chapSel -= visible_rows(); if (chapSel < 0) chapSel = 0; }
                             else if (b == JOY_R) { chapSel += visible_rows(); if (chapSel > chapCount - 1) chapSel = chapCount - 1; }
                             else if (b == JOY_Y) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; }
-                            else if (b == JOY_X) { offline_download_all_chapters(); }
+                            else if (b == JOY_X && areaIdx != AREA_BOOKS) { offline_download_all_chapters(); }
                             else if (b == JOY_A && chapCount > 0) enter_reader(chapSel);
                             else if (b == JOY_B) screen = g_chapters_back;
                             if (chapSel < chapScroll) chapScroll = chapSel;
@@ -4218,9 +5104,9 @@ int main(int argc, char **argv) {
                             if (b == JOY_UP && contSel > 0) contSel--;
                             else if (b == JOY_DOWN && contSel < contN - 1) contSel++;
                             else if (b == JOY_A && contN > 0) enter_reader_from_record(contIds[contSel]);
-                            else if (b == JOY_X) { areaIdx = AREA_DOWNLOADED; g_offline_back = SC_CONTINUE; load_offline_manager(); screen = SC_OFFLINE; }
-                            else if (b == JOY_Y) { areaIdx = AREA_LOCAL; g_local_back = SC_CONTINUE; load_local_browser(g_local_root); screen = SC_LOCAL; }
-                            else if (b == JOY_B) screen = SC_SERIES;
+                            else if (b == JOY_X) { areaIdx = AREA_DOWNLOADED; save_current_area(); g_offline_back = SC_CONTINUE; load_offline_manager(); screen = SC_OFFLINE; }
+                            else if (b == JOY_Y) { areaIdx = AREA_LOCAL; save_current_area(); g_local_back = SC_CONTINUE; load_local_browser(local_start_path()); screen = SC_LOCAL; }
+                            else if (b == JOY_B) switch_area_to(areaIdx);
                             if (contSel < contScroll) contScroll = contSel;
                             if (contSel >= contScroll + visible_rows()) contScroll = contSel - visible_rows() + 1;
                         } else if (screen == SC_OFFLINE) {
@@ -4280,18 +5166,20 @@ int main(int argc, char **argv) {
                                 screen = SC_LOCAL_PICKER;
                             } else if (b == JOY_Y) {
                                 mkdir(LOCAL_ROOT_DEFAULT, 0777);
+                                mkdir(LOCAL_BOOKS_DEFAULT, 0777);
                                 local_root_save(LOCAL_ROOT_DEFAULT);
-                                success_screen("Pasta padrao definida.", "Coloque seus CBZ em sdmc:/Mangas.");
+                                success_screen("Pastas padrao definidas.", "Mangas: sdmc:/Mangas  Livros: sdmc:/Livros");
                             } else if (b == JOY_B) screen = catalogFavorites ? SC_FAVORITES : SC_SERIES;
                         } else {
                             if (b == JOY_A && next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) reader_open_next_chapter_now();
                             else if (b == JOY_X && next_prompt_started) { next_prompt_cancelled = 1; next_prompt_started = 0; reader_show_overlay(); }
                             else if (b == JOY_X && g_reader_source == READER_SRC_REMOTE) offline_download_current_chapter();
+                            else if (b == JOY_Y && g_reader_source == READER_SRC_DOC) doc_cycle_text_size();
                             else if (b == JOY_DOWN) reader_scroll_or_turn(1);
                             else if (b == JOY_UP) reader_scroll_or_turn(-1);
                             else if (b == JOY_R || b == JOY_DRIGHT || b == JOY_A) reader_scroll_or_turn(1);
                             else if (b == JOY_L || b == JOY_DLEFT) reader_scroll_or_turn(-1);
-                            else if (b == JOY_B) { pageTex = NULL; pageTexPage = 0; screen = g_reader_back; }
+                            else if (b == JOY_B) { reader_leave(); screen = g_reader_back; }
                         }
                     }
                 }
@@ -4320,6 +5208,7 @@ int main(int argc, char **argv) {
     }
 
 cleanup:
+    doc_engine_exit();
     page_cache_clear();
     if (g_ser)   cJSON_Delete(g_ser);
     if (g_cat)   cJSON_Delete(g_cat);

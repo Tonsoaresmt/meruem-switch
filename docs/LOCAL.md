@@ -1,18 +1,20 @@
 # Leitura Local no SD
 
-O Meruem Switch tambem pode ler mangas proprios direto do SD do dispositivo, sem
-passar pelo servidor Meruem. Isso e util para colecoes pessoais, viagens ou uso
-sem internet.
+O Meruem Switch tambem pode ler mangas e livros proprios direto do SD do
+dispositivo, sem passar pelo servidor Meruem. Isso e util para colecoes
+pessoais, viagens ou uso sem internet.
 
 ## Pasta Padrao
 
-A pasta recomendada e:
+As pastas recomendadas sao:
 
 ```text
 sdmc:/Mangas
+sdmc:/Livros
 ```
 
-No PC, abra o SD do Switch e coloque seus arquivos dentro da pasta `Mangas`.
+No PC, abra o SD do Switch e coloque mangás/CBZ/imagens em `Mangas` e livros
+PDF/EPUB em `Livros`.
 Depois, no app:
 
 1. Abra `Conta`.
@@ -26,6 +28,8 @@ Depois, no app:
 Suportado agora:
 
 - `.cbz`;
+- `.pdf`;
+- `.epub`;
 - pastas com imagens `.jpg`, `.jpeg`, `.png`, `.webp` ou `.bmp`.
 
 Exemplos validos:
@@ -35,13 +39,14 @@ sdmc:/Mangas/Volume 1.cbz
 sdmc:/Mangas/In the Land of Leadale/Volume 1.cbz
 sdmc:/Mangas/Minha Obra/Capitulo 01/001.jpg
 sdmc:/Mangas/Minha Obra/Capitulo 01/002.jpg
+sdmc:/Livros/Meu Livro.pdf
+sdmc:/Livros/Minha Novel.epub
 ```
 
 Ainda nao suportado para leitura local:
 
 - `.cbr`;
-- `.pdf`;
-- `.epub`.
+- PDF/EPUB com DRM.
 
 ## Mesmo Leitor
 
@@ -50,7 +55,7 @@ Arquivos locais usam o mesmo leitor do conteudo online:
 - toque para avancar e voltar paginas;
 - giro/retrato;
 - zoom por pinca;
-- cache de pagina atual, anterior e proxima;
+- cache/preparo de paginas de imagem quando aplicavel;
 - tela de loading;
 - progresso de leitura.
 
@@ -82,7 +87,8 @@ apagar mangas pessoais colocados manualmente na pasta `sdmc:/Mangas`.
 Confira:
 
 - se os arquivos estao dentro de `sdmc:/Mangas`;
-- se o formato e `.cbz` ou uma pasta com imagens suportadas;
+- se os livros estao dentro de `sdmc:/Livros`;
+- se o formato e `.cbz`, `.pdf`, `.epub` ou uma pasta com imagens suportadas;
 - se a area atual do app esta em `Local`;
 - se a pasta escolhida em `Conta > Escolher local` aponta para o lugar certo.
 

@@ -1,9 +1,9 @@
 # Meruem Switch
 
 Meruem Switch e o app homebrew do Meruem para Nintendo Switch. Ele permite ler
-mangas e HQs da plataforma Meruem diretamente no console, com login, favoritos,
-continuar lendo, leitura offline/local, zoom por toque e atualizacoes pelo
-proprio app.
+mangas, HQs e livros da plataforma Meruem diretamente no console, com login,
+favoritos, continuar lendo, leitura offline/local, zoom por toque e
+atualizacoes pelo proprio app.
 
 O objetivo e simples: levar a experiencia do Meruem para o Switch de forma
 pratica, leve e acessivel.
@@ -73,12 +73,16 @@ caso de duvida, consulte a tela de planos dentro do Meruem.
 
 ## Recursos
 
-- Catalogo de mangas e HQs.
+- Catalogo de mangas, HQs e livros.
 - Login com conta Meruem.
 - Favoritos e prateleira sincronizados.
 - Continuar lendo.
 - Area Baixados para capitulos do Meruem salvos no SD.
 - Area Local para CBZ e pastas de imagens do proprio usuario no SD.
+- Area Livros para baixar e ler PDF/EPUB do Meruem no SD do Switch.
+- Pasta local `sdmc:/Livros` para PDF/EPUB do proprio usuario no dispositivo.
+- Ultima area usada lembrada ao reabrir o app.
+- Catalogo online com variacao de pagina inicial para descobrir obras novas.
 - Modo capas e modo lista.
 - Ordem de capitulos: mais antigos ou mais novos primeiro.
 - Leitura por controle ou touch.
@@ -90,7 +94,8 @@ caso de duvida, consulte a tela de planos dentro do Meruem.
 
 ## Formatos Suportados
 
-O Meruem Switch foi feito para conteudo entregue como paginas de imagem.
+O Meruem Switch foi feito para conteudo entregue como paginas de imagem e,
+na area Livros, tambem abre PDF/EPUB vindos do Meruem.
 
 Suportado:
 
@@ -98,25 +103,25 @@ Suportado:
 - CBR, quando disponivel como paginas de imagem;
 - mangas e HQs compativeis com leitura por paginas;
 - Manhwa/Webtoon em tiras verticais dentro de `.cbz` ou pastas de imagens;
+- PDF/EPUB online pela area Livros;
 - CBZ local direto do SD;
+- PDF/EPUB local direto do SD pela area Local;
 - pastas locais com imagens `.jpg`, `.jpeg`, `.png`, `.webp` ou `.bmp`.
 
 Nao suportado no app do Switch por enquanto:
 
-- PDF;
-- EPUB;
 - livros de texto;
-- CBR/PDF locais abertos direto do SD.
+- CBR local aberto direto do SD.
 
-PDF e EPUB sao filtrados para evitar tela roxa, erro de leitura ou obras que o
-Switch nao consegue abrir corretamente.
+Para livros do proprio usuario, coloque PDF/EPUB em `sdmc:/Livros` ou escolha
+uma pasta local em Conta.
 
 ## Controles Principais
 
 Catalogo:
 
 - `A`: abrir obra/capitulo;
-- `X`: alternar entre capas e lista;
+- `X`: alternar entre capas e lista; quando ha busca ativa, limpa a busca;
 - `Y`: trocar area;
 - `L/R`: pagina anterior/proxima;
 - `B`: voltar ou ir para continuar lendo.
@@ -129,6 +134,7 @@ Leitor:
 - pinca com dois dedos: zoom;
 - arrastar com um dedo: mover imagem quando esta com zoom;
 - `B`: voltar;
+- `Y`: em PDF/EPUB, alterna tamanho do texto/zoom;
 - `ZL/ZR`: girar tela.
 
 ## Atualizacoes

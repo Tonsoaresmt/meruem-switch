@@ -3,6 +3,26 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.18.4
+- Area Livros restaurada no Meruem principal, usando `/switch/books/*` para
+  listar, baixar e abrir PDF/EPUB do Meruem no mesmo leitor do app.
+- Leitura Local agora tambem reconhece PDF/EPUB no SD, com pasta padrao
+  `sdmc:/Livros`, progresso em Continuar lendo e suporte offline sem servidor.
+- Leitor de PDF/EPUB ganhou area segura contra sobreposicao da barra, controle
+  `Y`/botao `Texto` ou `Zoom` e mensagens mais claras de download/abertura.
+- PDF/EPUB agora corta margem branca automaticamente e usa preenchimento em
+  paginas de capa/arte, para ocupar melhor a tela do Switch sem deformar.
+- Tamanho de texto/zoom de livros agora tem `P`, `M`, `G` e `XG`.
+- O app salva a ultima area usada (`Mangas`, `HQ`, `Livros`, `Baixados` ou
+  `Local`) e volta para ela na proxima abertura/biblioteca quando possivel.
+- Catalogo online agora varia a pagina inicial ao entrar em uma area sem busca,
+  ajudando o usuario a descobrir obras diferentes em Mangas, HQ e Livros.
+- Leitor de PDF/EPUB nao mostra mais legenda inferior por cima do texto; PDFs
+  em `M`, `G` e `XG` abrem como leitura rolavel em vez de pagina estatica.
+- Busca no app agora mostra `Limpar`, e `B`/`X` limpam uma busca ativa antes de
+  sair; o proxy tambem tenta achar livros pelo nome do volume/PDF quando a busca
+  por obra volta vazia.
+
 ## v0.18.3
 - Webtoon/manhwa: paginas em tira vertical agora preenchem a LARGURA da tela e
   rolam na vertical, em vez de aparecerem minusculas e exigirem zoom (que borrava
