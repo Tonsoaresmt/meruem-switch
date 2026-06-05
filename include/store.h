@@ -24,6 +24,9 @@ void store_save_local_root(const char *path);
 int  store_load_last_area(char *out, size_t cap);
 void store_save_last_area(const char *area);
 
+int  store_load_area_hidden_mask(unsigned *mask);
+void store_save_area_hidden_mask(unsigned mask);
+
 // Estado offline de uma serie: 0 = nada, 1 = parcial, 2 = baixada inteira.
 int  store_get_series_offline(const char *seriesId);
 void store_set_series_offline(const char *seriesId, int state);
@@ -31,6 +34,10 @@ void store_clear_series_offline_all(void);
 
 // pagina salva de um capitulo (>=1) ou 1 se nao houver.
 int  store_get_progress(const char *bookId);
+
+// Preferencia visual de livros/PDF/EPUB por item. fallback normalmente = M.
+int  store_get_doc_scale(const char *bookId, int fallback);
+void store_set_doc_scale(const char *bookId, int scale);
 
 // registra/atualiza a leitura (pagina atual + metadados p/ "continuar lendo").
 void store_record(const char *bookId, int page, const char *seriesId,

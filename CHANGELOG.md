@@ -3,6 +3,44 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.18.9
+- Leitor de livros deixou de mostrar `Zoom P/M/G/XG`; agora o controle aparece
+  como `Texto P/M/G/XG`, alinhado com leitura de livro.
+- PDFs/EPUBs preservam a folha inteira, incluindo margens e capas, sem recorte
+  automatico agressivo que fazia a pagina parecer uma imagem ampliada.
+- Pinch e toque duplo nao aplicam mais zoom em livros. O usuario rola a folha e
+  so avanca quando chega ao fim da pagina.
+
+## v0.18.8
+- Login por QR: o usuario pode escanear um QR no Switch, entrar pelo celular e o
+  app salva automaticamente a conta/token no SD.
+- A aba Conta ganhou o botao `QR login`, alem do login tradicional por
+  usuario/senha.
+- O QR usa sessao temporaria com `secret` separado: o QR mostra so URL/codigo, e
+  o token real volta apenas pelo polling seguro do Switch.
+- O app ja aplica restricoes explicitas de area quando o servidor enviar
+  `allowedAreas`.
+
+## v0.18.7
+- Conta ganhou a tela `Areas visiveis`, aberta pelo botao `Areas` ou por `L/R`,
+  para ocultar `Mangas`, `HQ`, `Livros`, `Baixados` e `Local`.
+- O botao `Area`, a tela `Continuar lendo`, os atalhos `X/Y` e a area restaurada
+  ao abrir o app agora respeitam as areas ocultas.
+- O app impede ocultar todas as areas ao mesmo tempo, evitando que o usuario
+  fique sem caminho para abrir a biblioteca.
+
+## v0.18.6
+- Livros agora abrem por padrao em `M`; quando o usuario muda para `P`, `G` ou
+  `XG`, essa escolha fica salva naquele livro.
+- PDFs usam a folha inteira como leitura continua: o usuario rola ate o fim da
+  pagina e so entao avanca para a proxima.
+- Ajuste fino de zoom para `P`, `M`, `G` e `XG`, mantendo a pagina preenchendo a
+  area util do Switch e evitando a sensacao de "foto estatica".
+- Catalogo evita a segunda chamada de rede na variacao aleatoria quando ja sabe
+  o total de paginas da area, reduzindo demora ao alternar Mangas/HQ/Livros.
+- Loop principal reduz redraw desnecessario quando capas terminam de baixar fora
+  das telas de catalogo, poupando CPU/GPU e bateria.
+
 ## v0.18.5
 - Area Livros restaurada no Meruem principal, usando `/switch/books/*` para
   listar, baixar e abrir PDF/EPUB do Meruem no mesmo leitor do app.

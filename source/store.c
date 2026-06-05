@@ -16,6 +16,7 @@
 #define SEEN_F   DIR_APP "/update_seen.txt"
 #define LOCAL_F  DIR_APP "/local_root.txt"
 #define AREA_F   DIR_APP "/last_area.txt"
+#define AREAS_F  DIR_APP "/hidden_areas.txt"
 #define PROG_F   DIR_APP "/progress.json"
 #define OFFSER_F DIR_APP "/offline_series.json"
 
@@ -235,6 +236,32 @@ void store_save_last_area(const char *area) {
     fclose(f);
 }
 
+int store_load_area_hidden_mask(unsigned *mask) {
+    FILE *f;
+    char buf[32];
+    size_t n;
+    if (!mask) return 0;
+    *mask = 0;
+    f = fopen(AREAS_F, "rb");
+    if (!f) return 0;
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    trim_line(buf);
+    if (!buf[0]) return 0;
+    *mask = (unsigned)strtoul(buf, NULL, 10);
+    return 1;
+}
+
+void store_save_area_hidden_mask(unsigned mask) {
+    FILE *f = fopen(AREAS_F, "wb");
+    char buf[32];
+    if (!f) return;
+    snprintf(buf, sizeof(buf), "%u", mask);
+    fwrite(buf, 1, strlen(buf), f);
+    fclose(f);
+}
+
 void store_flush(void) {
     if (!g_prog) return;
     char *s = cJSON_PrintUnformatted(g_prog);
@@ -252,6 +279,20 @@ int store_get_progress(const char *bookId) {
     cJSON *p = cJSON_GetObjectItemCaseSensitive(it, "p");
     int v = cJSON_IsNumber(p) ? p->valueint : 1;
     return v >= 1 ? v : 1;
+}
+
+int store_get_doc_scale(const char *bookId, int fallback) {
+    if (fallback < 0) fallback = 0;
+    if (fallback > 3) fallback = 3;
+    if (!g_prog || !bookId || !bookId[0]) return fallback;
+    cJSON *it = cJSON_GetObjectItemCaseSensitive(g_prog, bookId);
+    if (!it || !cJSON_IsObject(it)) return fallback;
+    cJSON *x = cJSON_GetObjectItemCaseSensitive(it, "ds");
+    if (!cJSON_IsNumber(x)) return fallback;
+    int v = x->valueint;
+    if (v < 0) v = 0;
+    if (v > 3) v = 3;
+    return v;
 }
 
 static void jset_num(cJSON *o, const char *k, double v) {
@@ -281,6 +322,21 @@ void store_record(const char *bookId, int page, const char *seriesId,
     jset_str(it, "pb", pageBase);
     jset_str(it, "cv", seriesCover);
     jset_num(it, "pg", pages);
+    jset_num(it, "ts", (double)time(NULL));
+    store_flush();
+}
+
+void store_set_doc_scale(const char *bookId, int scale) {
+    if (!g_prog || !bookId || !bookId[0]) return;
+    if (scale < 0) scale = 0;
+    if (scale > 3) scale = 3;
+    cJSON *it = cJSON_GetObjectItemCaseSensitive(g_prog, bookId);
+    if (!it || !cJSON_IsObject(it)) {
+        if (it) cJSON_DeleteItemFromObjectCaseSensitive(g_prog, bookId);
+        it = cJSON_CreateObject();
+        cJSON_AddItemToObject(g_prog, bookId, it);
+    }
+    jset_num(it, "ds", scale);
     jset_num(it, "ts", (double)time(NULL));
     store_flush();
 }

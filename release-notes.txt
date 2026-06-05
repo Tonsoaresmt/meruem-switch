@@ -1,27 +1,12 @@
-Meruem v0.18.5
+Meruem v0.18.9
 
-Nova area: Livros
-- O Meruem Switch agora tem a area Livros no acervo.
-- PDF e EPUB do Meruem podem ser baixados para o SD e abertos no proprio app.
-- A primeira abertura salva o livro no SD; depois ele abre como livro salvo.
+Polimento do leitor de livros
+- O leitor de PDF/EPUB deixou de tratar livros como "imagem com zoom".
+- O botao agora fica como Texto P/M/G/XG, sem rotulo de Zoom.
+- PDFs preservam a folha inteira, com margens e capa, sem recorte automatico
+  agressivo que fazia a pagina parecer uma foto ampliada.
+- Pinch e toque duplo nao aplicam zoom em livros; arrastar continua rolando a
+  folha e so avanca quando chega ao fim.
 
-Livros do proprio dispositivo
-- A area Local agora tambem reconhece PDF/EPUB.
-- Coloque seus livros em sdmc:/Livros ou escolha uma pasta local em Conta.
-- O progresso aparece em Continuar lendo e funciona sem internet.
-
-Leitor de livros melhorado
-- Botao/atalho Y alterna Texto/Zoom em P, M, G e XG.
-- PDF/EPUB nao mostram mais legenda inferior por cima do texto.
-- PDFs em M/G/XG abrem como leitura rolavel, em vez de parecerem foto estatica.
-- Margens brancas sao cortadas automaticamente e capas/arte ocupam melhor a tela.
-
-Navegacao e descoberta
-- O app lembra a ultima area usada: Mangas, HQ, Livros, Baixados ou Local.
-- Ao entrar em Mangas, HQ ou Livros sem busca, o catalogo varia a pagina inicial
-  para mostrar obras diferentes e facilitar descobertas.
-- Busca ativa agora tem Limpar; B ou X limpam a busca antes de sair.
-
-Tambem mantem os recursos recentes: leitura Local de CBZ/imagens, webtoon/manhwa
-rolavel, Baixados com tamanho no SD, auto-update pelo GitHub e controles por
-toque/controle.
+Tambem mantem: login por QR no celular, areas ocultaveis em Conta, area Livros,
+PDF/EPUB online e local, webtoon/manhwa rolavel e melhorias de performance.
