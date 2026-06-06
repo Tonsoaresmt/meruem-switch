@@ -95,7 +95,7 @@ static void add_install_path(char paths[][640], int *count, const char *path) {
 static int copy_file(const char *src, const char *dst, char *err, size_t errcap) {
     FILE *in = NULL;
     FILE *out = NULL;
-    unsigned char buf[32 * 1024];
+    unsigned char buf[256 * 1024];
     size_t n;
 
     in = fopen(src, "rb");
@@ -155,6 +155,12 @@ static int replace_with_file(const char *src, const char *dst, char *err, size_t
     } else if (errno != ENOENT) {
         if (err && errcap) snprintf(err, errcap, "Nao preparei destino (%d).", errno);
         return -1;
+    }
+    // Caminho rapido: o arquivo temporario e o destino estao no SD, entao um
+    // rename evita copiar ~45 MB de novo. Se falhar, ainda temos fallback.
+    if (rename(src, dst) == 0) {
+        if (renamed_old) remove(bak);
+        return 0;
     }
     if (copy_file(src, dst, err, errcap) != 0) {
         remove(dst);

@@ -141,6 +141,7 @@ long net_download_file_timeout(const char *url, const char *bearer,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, total_timeout);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 256L * 1024L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, f);
 

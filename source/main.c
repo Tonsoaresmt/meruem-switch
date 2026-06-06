@@ -630,6 +630,16 @@ static int catalog_random_page(int totalPages) {
     return r % totalPages;
 }
 
+static int catalog_random_page_away(int totalPages, int avoidPage) {
+    if (totalPages <= 1) return 0;
+    if (avoidPage < 0 || avoidPage >= totalPages) return catalog_random_page(totalPages);
+    int r = rand();
+    if (r < 0) r = -r;
+    int page = r % (totalPages - 1);
+    if (page >= avoidPage) page++;
+    return page;
+}
+
 static const char *catalog_search_guide(void) {
     if (areaIdx == AREA_BOOKS) return "Buscar livro/obra (vazio = limpar)";
     if (areaIdx == AREA_COMICS) return "Buscar HQ (vazio = limpar)";
@@ -642,6 +652,7 @@ static void clear_catalog_search(void) {
     catPage = 0;
     catSel = 0;
     catScroll = 0;
+    catalogRandomizeNext = 1;
     if (catalogFavorites) load_favorites();
     else load_catalog();
 }
@@ -1038,6 +1049,139 @@ static void draw_qr_matrix(const QrLoginState *st, int cx, int y, int maxSize) {
             SDL_RenderFillRect(gRen, &m);
         }
     }
+}
+
+static int switch_access_load(QrLoginState *st, char plans[][160], int *planCount, char *summary, size_t summaryCap) {
+    if (!st) return 0;
+    memset(st, 0, sizeof(*st));
+    if (planCount) *planCount = 0;
+    if (summary && summaryCap) summary[0] = '\0';
+    snprintf(st->status, sizeof(st->status), "Carregando cadastro e planos...");
+
+    char url[512];
+    snprintf(url, sizeof(url), "%s/switch/access/info", g_server);
+    struct membuf r = {0};
+    long code = net_request_timeout(url, "GET", NULL, NULL, &r, NULL, 6L, 14L);
+    if (code != 200 || !r.data || response_looks_like_html(r.data)) {
+        snprintf(st->loginUrl, sizeof(st->loginUrl), "%s/switch-access", g_server[0] ? g_server : DEFAULT_SERVER);
+        snprintf(st->status, sizeof(st->status), "Abra este link no celular.");
+        membuf_free(&r);
+        return 0;
+    }
+
+    cJSON *root = cJSON_Parse(r.data);
+    membuf_free(&r);
+    if (!root) {
+        snprintf(st->status, sizeof(st->status), "Resposta de acesso invalida.");
+        return 0;
+    }
+
+    snprintf(st->loginUrl, sizeof(st->loginUrl), "%s", json_str(root, "accessUrl", ""));
+    if (summary && summaryCap) snprintf(summary, summaryCap, "%s", json_str(root, "summary", ""));
+    cJSON *qr = cJSON_GetObjectItemCaseSensitive(root, "qr");
+    cJSON *rows = cJSON_GetObjectItemCaseSensitive(qr, "rows");
+    if (cJSON_IsArray(rows)) {
+        int n = cJSON_GetArraySize(rows);
+        if (n > QR_MAX_ROWS) n = QR_MAX_ROWS;
+        for (int i = 0; i < n; i++) {
+            cJSON *row = cJSON_GetArrayItem(rows, i);
+            if (!cJSON_IsString(row) || !row->valuestring) continue;
+            snprintf(st->rows[st->rowCount], sizeof(st->rows[st->rowCount]), "%.*s", QR_MAX_COLS, row->valuestring);
+            int cols = (int)strlen(st->rows[st->rowCount]);
+            if (cols > st->colCount) st->colCount = cols;
+            st->rowCount++;
+        }
+    }
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "plans");
+    if (cJSON_IsArray(arr) && plans && planCount) {
+        int n = cJSON_GetArraySize(arr);
+        if (n > 4) n = 4;
+        for (int i = 0; i < n; i++) {
+            cJSON *p = cJSON_GetArrayItem(arr, i);
+            const char *name = json_str(p, "name", "Plano");
+            const char *price = json_str(p, "price", "");
+            const char *duration = json_str(p, "duration", "");
+            snprintf(plans[*planCount], 160, "%s: %s%s%s",
+                     name, price[0] ? price : "valor no site",
+                     duration[0] ? " / " : "", duration);
+            (*planCount)++;
+        }
+    }
+    cJSON_Delete(root);
+
+    if (!st->loginUrl[0]) snprintf(st->loginUrl, sizeof(st->loginUrl), "%s/switch-access", g_server[0] ? g_server : DEFAULT_SERVER);
+    snprintf(st->status, sizeof(st->status), "Escaneie para criar conta gratis ou liberar premium.");
+    return st->rowCount > 0 ? 1 : 0;
+}
+
+static int switch_access_screen(void) {
+    QrLoginState st;
+    char plans[4][160];
+    char summary[180];
+    int planCount = 0;
+    present_color(20, 20, 40);
+    int hasQr = switch_access_load(&st, plans, &planCount, summary, sizeof(summary));
+
+    SDL_Event e;
+    Uint32 shown = SDL_GetTicks();
+    while (appletMainLoop()) {
+        int ready = (SDL_GetTicks() - shown) > 350;
+        int bw = LW() - 56;
+        int bx = 28, by = 78;
+        int bh = LH() - 156;
+        if (bh > 680) bh = 680;
+        int qrMax = bw - 120;
+        if (qrMax > 300) qrMax = 300;
+        if (qrMax < 160) qrMax = 160;
+        int qrY = by + 218;
+        Btn login = { bx + 28, by + bh - 118, bw - 56, 46, "Ja criei: entrar com QR" };
+        Btn back = { bx + 28, by + bh - 64, bw - 56, 42, "Voltar" };
+
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) return 0;
+            if (!ready) continue;
+            if (e.type == SDL_FINGERUP) {
+                int lx, ly;
+                screen_to_logical(e.tfinger.x, e.tfinger.y, &lx, &ly);
+                if (btn_hit(login, lx, ly)) return 1;
+                if (btn_hit(back, lx, ly)) return 0;
+            }
+            if (e.type == SDL_JOYBUTTONDOWN) {
+                if (e.jbutton.button == JOY_A) return 1;
+                if (e.jbutton.button == JOY_B || e.jbutton.button == JOY_PLUS) return 0;
+            }
+        }
+
+        begin_frame();
+        draw_background();
+        SDL_SetRenderDrawColor(gRen, 22, 30, 46, 244);
+        SDL_Rect box = { bx, by, bw, bh };
+        SDL_RenderFillRect(gRen, &box);
+        SDL_SetRenderDrawColor(gRen, 126, 217, 87, 220);
+        SDL_RenderDrawRect(gRen, &box);
+        SDL_Rect stripe = { bx, by, bw, 7 };
+        SDL_RenderFillRect(gRen, &stripe);
+
+        text_draw_fit(gRen, "Criar conta / liberar acesso", bx + 28, by + 24, bw - 56, COL_HEAD, 1);
+        text_draw_fit(gRen, "No celular: crie uma conta gratis para testar.", bx + 28, by + 72, bw - 56, COL_TEXT, 0);
+        text_draw_fit(gRen, "Premium libera Mangas, HQ e Livros sem limite.", bx + 28, by + 108, bw - 56, COL_SOFT, 0);
+        if (summary[0]) text_draw_fit(gRen, summary, bx + 28, by + 146, bw - 56, COL_DIM, 0);
+
+        int py = by + 174;
+        for (int i = 0; i < planCount && i < 3; i++) {
+            text_draw_fit(gRen, plans[i], bx + 28, py + i * 28, bw - 56, i == planCount - 1 ? COL_HEAD : COL_SEL, 0);
+        }
+
+        if (hasQr) draw_qr_matrix(&st, bx + bw / 2, qrY, qrMax);
+        else text_draw_fit(gRen, st.loginUrl, bx + 28, qrY + 52, bw - 56, COL_SEL, 0);
+        text_draw_fit(gRen, st.status, bx + 28, by + bh - 160, bw - 56, COL_SOFT, 0);
+        btn_draw(login);
+        btn_draw(back);
+        text_draw_fit(gRen, "A: entrar com QR depois do cadastro    B/+: voltar", bx + 28, by + bh - 18, bw - 56, COL_DIM, 0);
+        end_frame();
+        SDL_Delay(16);
+    }
+    return 0;
 }
 
 static int qr_login_screen(void) {
@@ -2854,7 +2998,7 @@ static void offline_download_all_chapters(void) {
     }
 }
 
-// Tela de boas-vindas / login. Retorna: 0 = sair, 1 = entrar, 2 = trocar conta, 3 = offline/local, 4 = QR.
+// Tela de boas-vindas / login. Retorna: 0 = sair, 1 = entrar, 2 = trocar conta, 3 = offline/local, 4 = QR, 5 = criar/liberar.
 static int login_welcome_screen(int hasUser, const char *user) {
     SDL_Event e;
     Uint32 shown = SDL_GetTicks();
@@ -2863,9 +3007,10 @@ static int login_welcome_screen(int hasUser, const char *user) {
         int bx = 28, by = 120;
         int bh = LH() - 240;
         if (bh > 560) bh = 560;
-        Btn qr = { bx + 28, by + bh - 244, bw - 56, 50, "Entrar com QR no celular" };
-        Btn enter = { bx + 28, by + bh - 186, bw - 56, 52, hasUser ? "Entrar com esta conta" : "Entrar com usuario/senha" };
-        Btn offline = { bx + 28, by + bh - 126, bw - 56, 48, "Ler offline / local" };
+        Btn access = { bx + 28, by + bh - 304, bw - 56, 50, hasUser ? "Liberar premium no celular" : "Criar conta gratis / Premium" };
+        Btn qr = { bx + 28, by + bh - 246, bw - 56, 50, "Entrar com QR no celular" };
+        Btn enter = { bx + 28, by + bh - 188, bw - 56, 52, hasUser ? "Entrar com esta conta" : "Entrar com usuario/senha" };
+        Btn offline = { bx + 28, by + bh - 128, bw - 56, 48, "Ler offline / local" };
         Btn swap  = { bx + 28, by + bh - 70,  bw - 56, 46, "Trocar conta" };
 
         while (SDL_PollEvent(&e)) {
@@ -2875,6 +3020,7 @@ static int login_welcome_screen(int hasUser, const char *user) {
             if (e.type == SDL_FINGERUP) {
                 int lx, ly;
                 screen_to_logical(e.tfinger.x, e.tfinger.y, &lx, &ly);
+                if (btn_hit(access, lx, ly)) return 5;
                 if (btn_hit(qr, lx, ly)) return 4;
                 if (btn_hit(enter, lx, ly)) return 1;
                 if (btn_hit(offline, lx, ly)) return 3;
@@ -2885,6 +3031,7 @@ static int login_welcome_screen(int hasUser, const char *user) {
                 if (e.jbutton.button == JOY_PLUS || e.jbutton.button == JOY_B) return 0;
                 if (e.jbutton.button == JOY_X) return 3;
                 if (e.jbutton.button == JOY_R || (!hasUser && e.jbutton.button == JOY_Y)) return 4;
+                if (e.jbutton.button == JOY_L) return 5;
                 if (hasUser && e.jbutton.button == JOY_Y) return 2;
             }
         }
@@ -2909,17 +3056,18 @@ static int login_welcome_screen(int hasUser, const char *user) {
             text_draw_fit(gRen, "QR: login pelo celular. Entrar: senha no Switch.", bx + 28, by + 186, bw - 56, COL_SOFT, 0);
         } else {
             text_draw_fit(gRen, "Bem-vindo! Para ler no Switch:", bx + 28, by + 96, bw - 56, COL_TEXT, 0);
-            text_draw_fit(gRen, "1) Crie sua conta no Meruem:", bx + 28, by + 142, bw - 56, COL_SOFT, 0);
-            text_draw_fit(gRen, g_server[0] ? g_server : DEFAULT_SERVER, bx + 28, by + 178, bw - 56, COL_SEL, 0);
-            text_draw_fit(gRen, "2) Volte aqui e toque em QR ou Entrar.", bx + 28, by + 218, bw - 56, COL_SOFT, 0);
+            text_draw_fit(gRen, "Crie gratis no celular para testar o menu.", bx + 28, by + 142, bw - 56, COL_SOFT, 0);
+            text_draw_fit(gRen, "Premium libera todas as areas sem limite.", bx + 28, by + 178, bw - 56, COL_SEL, 0);
+            text_draw_fit(gRen, "Depois volte aqui e entre com QR.", bx + 28, by + 218, bw - 56, COL_SOFT, 0);
             text_draw_fit(gRen, "Offline/Local le arquivos no SD.", bx + 28, by + 260, bw - 56, COL_DIM, 0);
         }
+        btn_draw(access);
         btn_draw(qr);
         btn_draw(enter);
         btn_draw(offline);
         if (hasUser) btn_draw(swap);
-        text_draw_fit(gRen, hasUser ? "A entrar  R QR  X offline/local  Y trocar  B/+ sair"
-                                    : "A entrar  Y/R QR  X offline/local  B/+ sair",
+        text_draw_fit(gRen, hasUser ? "A entrar  L premium  R QR  X offline/local  Y trocar"
+                                    : "A entrar  L criar/liberar  R QR  X offline/local",
                       bx + 28, by + bh - 26, bw - 56, COL_DIM, 0);
         end_frame();
         SDL_Delay(16);
@@ -2954,6 +3102,11 @@ static int authenticate(void) {
         if (act == 3) { g_offline_mode = 1; return 1; }
         if (act == 4) {
             if (qr_login_screen()) return 1;
+            hasUser = store_load_user(g_username, sizeof(g_username));
+            continue;
+        }
+        if (act == 5) {
+            if (switch_access_screen() && qr_login_screen()) return 1;
             hasUser = store_load_user(g_username, sizeof(g_username));
             continue;
         }
@@ -3015,7 +3168,7 @@ static int maybe_install_update(void) {
         draw_modal_box("Meruem", "Verificando atualizacoes...",
                        "Versao atual: " APP_VERSION_STR, NULL, blue, NULL);
     }
-    SDL_Delay(450);
+    SDL_Delay(120);
     rc = update_check(&info);
     write_update_log(rc, &info);
     // Atualizado, erro de rede ou sem repo configurado: segue sem incomodar.
@@ -3035,6 +3188,13 @@ static int maybe_install_update(void) {
     }
 
     present_color(20, 20, 40);
+    {
+        SDL_Color blue = { 96, 154, 232, 255 };
+        draw_modal_box("Atualizacao Meruem", "Baixando e instalando...",
+                       "Aguarde. Vou trocar o .nro no SD.",
+                       info.asset_name[0] ? info.asset_name : NULL, blue, NULL);
+    }
+    SDL_Delay(80);
     if (update_apply(&info, g_self_path, err, sizeof(err)) != 0) {
         message_screen("Falha ao instalar.", err[0] ? err : info.message);
         return 0;   // nao marca: permite tentar de novo no proximo boot
@@ -3130,6 +3290,61 @@ static void switch_area_next(void) {
 }
 
 // ---------------- dados ----------------
+static int build_catalog_url(char *url, size_t cap, int page) {
+    int n;
+    if (!url || cap == 0) return 0;
+    if (areaIdx == AREA_BOOKS) {
+        n = snprintf(url, cap, "%s/switch/books/catalog?size=%d&page=%d",
+                     g_server, PAGE_SIZE, page);
+    } else {
+        n = snprintf(url, cap, "%s/switch/catalog?area=%s&size=%d&page=%d",
+                     g_server, AREA_KEYS[areaIdx], PAGE_SIZE, page);
+    }
+    if (n <= 0 || (size_t)n >= cap) return 0;
+    if (g_search[0]) {
+        char enc[200];
+        net_urlencode(g_search, enc, sizeof(enc));
+        snprintf(url + n, cap - (size_t)n, "&search=%s", enc);
+    }
+    return 1;
+}
+
+static cJSON *fetch_catalog_json_page(int page, int *failed) {
+    char url[512];
+    struct membuf r = {0};
+    cJSON *root = NULL;
+    if (failed) *failed = 0;
+    if (!build_catalog_url(url, sizeof(url), page)) {
+        if (failed) *failed = 1;
+        return NULL;
+    }
+    long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
+    if (code == 200 && r.data) root = cJSON_Parse(r.data);
+    if (!root && failed) *failed = 1;
+    membuf_free(&r);
+    return root;
+}
+
+static void shuffle_catalog_series_if_needed(int shouldShuffle) {
+    if (!shouldShuffle || !g_cat || g_search[0] || catalogFavorites) return;
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(g_cat, "series");
+    int n = cJSON_GetArraySize(arr);
+    if (!cJSON_IsArray(arr) || n <= 1) return;
+    cJSON *shuffled = cJSON_CreateArray();
+    if (!shuffled) return;
+    while (n > 0) {
+        int r = rand();
+        if (r < 0) r = -r;
+        int idx = r % n;
+        cJSON *it = cJSON_DetachItemFromArray(arr, idx);
+        if (it) cJSON_AddItemToArray(shuffled, it);
+        n--;
+    }
+    if (!cJSON_ReplaceItemInObjectCaseSensitive(g_cat, "series", shuffled)) {
+        cJSON_Delete(shuffled);
+    }
+}
+
 static void load_catalog(void) {
     present_color(20, 20, 40);
     catalogFavorites = 0;
@@ -3143,49 +3358,39 @@ static void load_catalog(void) {
         catalogLoadFailed = 1;
         return;
     }
-    char url[512];
-    int n;
-    if (catalogRandomizeNext && !g_search[0] && catPage == 0) {
-        int knownTotal = catalogTotalCache[areaIdx];
-        if (knownTotal > 1) catPage = catalog_random_page(knownTotal);
-        catalogRandomizeNext = 0;
-    } else if (catalogRandomizeNext) {
-        catalogRandomizeNext = 0;
-    }
-    if (areaIdx == AREA_BOOKS) {
-        n = snprintf(url, sizeof(url), "%s/switch/books/catalog?size=%d&page=%d",
-                     g_server, PAGE_SIZE, catPage);
-    } else {
-        n = snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=%d",
-                     g_server, AREA_KEYS[areaIdx], PAGE_SIZE, catPage);
-    }
-    if (g_search[0] && n > 0 && (size_t)n < sizeof(url)) {
-        char enc[200];
-        net_urlencode(g_search, enc, sizeof(enc));
-        snprintf(url + n, sizeof(url) - n, "&search=%s", enc);
-    }
-    struct membuf r = {0};
-    long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
-    if (code == 200 && r.data) g_cat = cJSON_Parse(r.data);
-    else catalogLoadFailed = 1;
-    membuf_free(&r);
+    int shouldRandomize = catalogRandomizeNext && !g_search[0] && catPage == 0;
+    int knownTotal = shouldRandomize ? catalogTotalCache[areaIdx] : 0;
+    if (shouldRandomize && knownTotal > 1) catPage = catalog_random_page_away(knownTotal, 0);
+    if (catalogRandomizeNext) catalogRandomizeNext = 0;
+
+    g_cat = fetch_catalog_json_page(catPage, &catalogLoadFailed);
     if ((!g_cat || catalogLoadFailed) && !g_search[0] && catPage > 0) {
+        if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
         catPage = 0;
         catalogLoadFailed = 0;
-        if (areaIdx == AREA_BOOKS) {
-            snprintf(url, sizeof(url), "%s/switch/books/catalog?size=%d&page=0",
-                     g_server, PAGE_SIZE);
-        } else {
-            snprintf(url, sizeof(url), "%s/switch/catalog?area=%s&size=%d&page=0",
-                     g_server, AREA_KEYS[areaIdx], PAGE_SIZE);
+        g_cat = fetch_catalog_json_page(0, &catalogLoadFailed);
+    }
+    if (shouldRandomize && knownTotal <= 1 && g_cat && !catalogLoadFailed) {
+        int discoveredTotal = json_int(g_cat, "totalPages", 1);
+        if (discoveredTotal > 1) {
+            int randomPage = catalog_random_page_away(discoveredTotal, 0);
+            if (randomPage > 0) {
+                int randomFailed = 0;
+                cJSON *randomCat = fetch_catalog_json_page(randomPage, &randomFailed);
+                if (randomCat && !randomFailed) {
+                    cJSON_Delete(g_cat);
+                    g_cat = randomCat;
+                    catPage = randomPage;
+                    catalogLoadFailed = 0;
+                } else if (randomCat) {
+                    cJSON_Delete(randomCat);
+                }
+            }
+            catalogTotalCache[areaIdx] = discoveredTotal;
         }
-        struct membuf retry = {0};
-        long retryCode = net_request_timeout(url, "GET", NULL, g_token, &retry, NULL, 8L, 20L);
-        if (retryCode == 200 && retry.data) g_cat = cJSON_Parse(retry.data);
-        else catalogLoadFailed = 1;
-        membuf_free(&retry);
     }
     catCount = 0; catTotal = 1; catScroll = 0;
+    shuffle_catalog_series_if_needed(shouldRandomize);
     if (g_cat) {
         catTotal = json_int(g_cat, "totalPages", 1);
         catCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_cat, "series"));
@@ -3503,7 +3708,7 @@ static int enter_doc_reader_from_chapter(cJSON *c, Screen back) {
         } else {
             snprintf(url, sizeof(url), "%s%s", g_server, file);
         }
-        book_progress_modal("Primeira abertura: salvando no SD...", ttl[0] ? ttl : curSeriesTitle);
+        book_progress_modal("Baixando uma vez para ler offline...", ttl[0] ? ttl : curSeriesTitle);
         long code = net_download_file_timeout(url, g_token, path, NULL, 8L, 240L);
         if (code != 200) {
             remove(path);
@@ -3532,7 +3737,8 @@ static int enter_doc_reader_from_chapter(cJSON *c, Screen back) {
     book_progress_modal(downloadedNow ? "Download pronto. Abrindo..." : "Abrindo livro salvo no SD...",
                         ttl[0] ? ttl : curSeriesTitle);
     if (!doc_open_file(path)) {
-        message_screen("Nao consegui abrir este livro.", "O arquivo pode estar corrompido ou em formato nao suportado.");
+        remove(path);
+        message_screen("Livro salvo estava corrompido.", "Removi do SD. Abra de novo para baixar novamente.");
         return 0;
     }
     store_record(curBookId, curPage, curSeriesId, curSeriesTitle, curChapLabel, pageBase, curSeriesCover, pageCount);
@@ -3893,6 +4099,19 @@ static float reader_default_zoom(void) {
     return READER_ZOOM_MIN;
 }
 
+static int doc_page_from_ratio(int oldPage, int oldCount, int newCount) {
+    if (newCount < 1) return 1;
+    if (oldPage < 1) oldPage = 1;
+    if (oldCount < 1) oldCount = 1;
+    if (oldPage > oldCount) oldPage = oldCount;
+    if (oldCount <= 1) return oldPage > newCount ? newCount : oldPage;
+    double pos = (double)(oldPage - 1) / (double)(oldCount - 1);
+    int next = 1 + (int)(pos * (double)(newCount - 1) + 0.5);
+    if (next < 1) next = 1;
+    if (next > newCount) next = newCount;
+    return next;
+}
+
 static int doc_page_text_char_count(fz_page *page) {
     if (!page || !g_doc_ctx) return 9999;
     fz_stext_page *text = NULL;
@@ -4194,12 +4413,15 @@ static int doc_render_current_page(void) {
 
 static void doc_on_orientation_changed(void) {
     if (!g_doc || g_reader_source != READER_SRC_DOC) return;
+    int oldPage = curPage;
+    int oldCount = pageCount;
     if (g_doc_reflowable) {
         fz_try(g_doc_ctx) {
             SDL_Rect view;
             reader_view_rect(&view);
             fz_layout_document(g_doc_ctx, g_doc, view.w, view.h, doc_epub_em());
             pageCount = fz_count_pages(g_doc_ctx, g_doc);
+            curPage = doc_page_from_ratio(oldPage, oldCount, pageCount);
         }
         fz_catch(g_doc_ctx) {
             g_doc_failed_page = 1;
@@ -4215,6 +4437,8 @@ static void doc_on_orientation_changed(void) {
 
 static void doc_cycle_text_size(void) {
     if (g_reader_source != READER_SRC_DOC) return;
+    int oldPage = curPage;
+    int oldCount = pageCount;
     g_doc_text_scale = (g_doc_text_scale + 1) % DOC_TEXT_SCALE_COUNT;
     store_set_doc_scale(curBookId, g_doc_text_scale);
     if (!g_doc) {
@@ -4227,6 +4451,7 @@ static void doc_cycle_text_size(void) {
             reader_view_rect(&view);
             fz_layout_document(g_doc_ctx, g_doc, view.w, view.h, doc_epub_em());
             pageCount = fz_count_pages(g_doc_ctx, g_doc);
+            curPage = doc_page_from_ratio(oldPage, oldCount, pageCount);
         }
         fz_catch(g_doc_ctx) {
             g_doc_failed_page = 1;
@@ -4319,7 +4544,8 @@ static void reader_scroll_or_turn(int dir) {
     float h = th * reader_base_scale(tw, th) * rd_zoom;
     float maxY = h > view.h ? (h - (float)view.h) * 0.5f : 0.0f;
     int scrollable = maxY > 1.0f &&
-                     (reader_page_is_tall(tw, th) || g_reader_source == READER_SRC_DOC ||
+                     (reader_page_is_tall(tw, th) ||
+                      (g_reader_source == READER_SRC_DOC && !g_doc_page_fill_view) ||
                       rd_zoom > reader_default_zoom() + 0.01f);
     if (scrollable) {
         float step = (float)view.h * 0.82f;
@@ -5008,7 +5234,14 @@ static void handle_tap(int lx, int ly) {
         if (btn_hit(btn_search(), lx, ly)) {
             char term[96] = {0};
             int rs = prompt_text(catalog_search_guide(), term, sizeof(term), 0);
-            if (rs != -1) { snprintf(g_search, sizeof(g_search), "%s", rs == 0 ? term : ""); catPage = 0; catSel = 0; load_catalog(); }
+            if (rs != -1) {
+                snprintf(g_search, sizeof(g_search), "%s", rs == 0 ? term : "");
+                catPage = 0;
+                catSel = 0;
+                catScroll = 0;
+                if (!g_search[0]) catalogRandomizeNext = 1;
+                load_catalog();
+            }
             return;
         }
         if (catViewMode == 0) {
@@ -5220,7 +5453,8 @@ static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
         int ptw = 0, pth = 0;
         if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &ptw, &pth);
         // Arrasta com 1 dedo quando ha zoom OU quando a pagina e alta (rola a tira).
-        if (rd_zoom > reader_default_zoom() + 0.01f || reader_page_is_tall(ptw, pth) || g_reader_source == READER_SRC_DOC) {
+        if (rd_zoom > reader_default_zoom() + 0.01f || reader_page_is_tall(ptw, pth) ||
+            (g_reader_source == READER_SRC_DOC && !g_doc_page_fill_view)) {
             rd_pan_x += dx;
             rd_pan_y += dy;
             reader_clamp_pan();

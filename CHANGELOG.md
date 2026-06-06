@@ -3,6 +3,22 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.18.11
+- Instalador de atualizacao mais rapido no SD: depois de baixar o `.nro`, o app
+  tenta trocar o arquivo por `rename` em vez de copiar os ~45 MB uma segunda vez.
+- Tela de atualizacao agora deixa claro que esta baixando e instalando, evitando
+  a sensacao de travamento.
+- A entrada em Mangas, HQ e Livros voltou a escolher uma pagina aleatoria do
+  acervo e embaralhar a pagina, evitando abrir sempre nas mesmas obras.
+- Tela inicial sem conta ganhou `Criar conta gratis / Premium`, com QR para o
+  celular, valores dos planos e atalho para voltar ao login QR depois.
+- Livros EPUB preservam melhor a posicao aproximada ao girar a tela ou trocar
+  `Texto P/M/G/XG`.
+- Capas/arte de PDF continuam preenchendo e centralizadas, mas deixam de se
+  comportar como pagina de texto arrastavel.
+- Se um livro baixado do Meruem ficar corrompido/partial no SD, o app remove
+  esse cache e orienta abrir de novo para baixar limpo.
+
 ## v0.18.10
 - Hotfix no leitor de livros: capas/arte em PDF voltam a ser tratadas como capa,
   ficando centralizadas e preenchendo melhor a tela.
