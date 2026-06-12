@@ -1,22 +1,14 @@
-Meruem v0.18.11
+Meruem v0.18.12
 
-Polimento de livros e atualizacao
-- Atualizacao mais rapida no SD: depois de baixar o Meruem.nro, o app evita
-  copiar o arquivo inteiro uma segunda vez quando o Switch permite trocar por
-  rename.
-- A tela de update agora informa que esta baixando/instalando, em vez de parecer
-  travada.
-- Mangas, HQ e Livros voltam a variar a pagina/ordem ao entrar na area sem
-  busca, para o usuario descobrir obras diferentes.
-- Usuarios novos agora veem `Criar conta gratis / Premium`: o Switch mostra QR
-  para criar conta no celular, ver valores e liberar premium pelo gateway.
-- EPUB preserva melhor a posicao de leitura ao girar a tela ou trocar Texto
-  P/M/G/XG.
-- Capas/arte de PDF continuam centralizadas e preenchendo melhor a tela, sem
-  virar uma pagina arrastavel como texto.
-- Se um PDF/EPUB baixado ficar corrompido no SD, o app remove o cache e orienta
-  abrir de novo para baixar limpo.
+Favoritos pelo Switch
+- Agora e possivel favoritar ou remover uma obra dos favoritos direto pelo
+  Nintendo Switch.
+- Na tela de capitulos, o topo ganhou o botao `Favoritar`/`Favorito`, ao lado
+  de `Mais novos`/`Mais antigos`.
+- O app sincroniza o estado com o servidor ao abrir a obra e atualiza a aba
+  Favoritos quando voce volta.
+- Se a conta ainda nao tiver acesso ao recurso, o app mostra uma mensagem clara
+  orientando a colaborar com o projeto pelo celular.
 
-Tambem mantem: Texto P/M/G/XG em livros, login por QR no celular, areas
-ocultaveis em Conta, PDF/EPUB online e local, webtoon/manhwa rolavel e melhorias
-de performance.
+Tambem mantem: livros PDF/EPUB online e local, webtoon/manhwa rolavel, login
+por QR, areas ocultaveis, leitura offline/local e atualizacao pelo proprio app.

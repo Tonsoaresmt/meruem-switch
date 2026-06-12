@@ -124,6 +124,8 @@ static int chapCount = 0, chapSel = 0, chapScroll = 0;
 static char curSeriesTitle[256] = {0};
 static char curSeriesId[96] = {0};
 static char curSeriesCover[640] = {0};
+static int curSeriesFavorite = -1;     // -1 = desconhecido, 0 = nao, 1 = sim
+static int favoritesDirty = 0;
 static int chapReversed = 0;              // 1 = mostrar do mais novo pro mais antigo
 static Screen g_chapters_back = SC_SERIES;
 static Screen g_reader_back = SC_CHAPTERS;   // pra onde o leitor volta no B
@@ -473,6 +475,20 @@ static Btn btn_next(void)   { Btn b = { LW() - 116, LH() - 50, 110, 40, "Pag >" 
 static Btn btn_up(void)     { Btn b = { LW() - 76, TB + 8, 68, 64, "/\\" }; return b; }
 static Btn btn_down(void)   { Btn b = { LW() - 76, LH() - FOOTER_H - 76, 68, 64, "\\/" }; return b; }
 static Btn btn_chap_order(void) { Btn b = { LW() - 312, 8, 170, TB - 14, chapReversed ? "Mais antigos" : "Mais novos" }; return b; }
+static const char *favorite_button_label(void) {
+    if (curSeriesFavorite == 1) return "Favorito";
+    return "Favoritar";
+}
+static Btn btn_favorite_series(void) {
+    Btn back = btn_back();
+    Btn order = btn_chap_order();
+    int x = back.x + back.w + 12;
+    int w = order.x - x - 12;
+    if (w > 150) w = 150;
+    if (w < 112) w = 112;
+    Btn b = { x, 8, w, TB - 14, favorite_button_label() };
+    return b;
+}
 static Btn btn_download_all(void) {
     int st = store_get_series_offline(curSeriesId);
     const char *lbl = st == 2 ? "Baixada (rebaixar)" : (st == 1 ? "Completar download" : "Baixar tudo (offline)");
@@ -3522,6 +3538,108 @@ static void toggle_catalog_view(void) {
     clamp_catalog_scroll_to_selection();
 }
 
+static void refresh_current_favorite_state(void) {
+    if (!curSeriesId[0]) {
+        curSeriesFavorite = -1;
+        return;
+    }
+    if (!g_token || g_offline_mode) return;
+
+    char url[512];
+    snprintf(url, sizeof(url), "%s/favorites", g_server);
+    struct membuf r = {0};
+    long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 5L, 12L);
+    if (code != 200 || !r.data || response_looks_like_html(r.data)) {
+        membuf_free(&r);
+        return;
+    }
+
+    cJSON *root = cJSON_Parse(r.data);
+    membuf_free(&r);
+    if (!root) return;
+    cJSON *items = cJSON_GetObjectItemCaseSensitive(root, "items");
+    int found = 0;
+    if (cJSON_IsArray(items)) {
+        int n = cJSON_GetArraySize(items);
+        for (int i = 0; i < n; i++) {
+            cJSON *it = cJSON_GetArrayItem(items, i);
+            const char *id = json_str(it, "seriesId", "");
+            if (!strcmp(id, curSeriesId)) {
+                found = 1;
+                break;
+            }
+        }
+    }
+    curSeriesFavorite = found ? 1 : 0;
+    cJSON_Delete(root);
+}
+
+static void toggle_current_favorite(void) {
+    if (!curSeriesId[0]) {
+        message_screen("Obra nao identificada.", "Volte ao catalogo e abra novamente.");
+        return;
+    }
+    if (g_offline_mode || !g_token) {
+        message_screen("Favoritos precisam de login.", "Entre com sua conta Meruem para sincronizar.");
+        return;
+    }
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        message_screen("Sem memoria para favoritar.", "Tente novamente.");
+        return;
+    }
+    cJSON_AddStringToObject(body, "seriesId", curSeriesId);
+    cJSON_AddStringToObject(body, "seriesTitle", curSeriesTitle[0] ? curSeriesTitle : "Obra");
+    cJSON_AddStringToObject(body, "area", areaIdx >= 0 && areaIdx < AREA_COUNT ? area_storage_key(areaIdx) : "");
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) {
+        message_screen("Sem memoria para favoritar.", "Tente novamente.");
+        return;
+    }
+
+    char url[512];
+    snprintf(url, sizeof(url), "%s/favorites", g_server);
+    struct membuf r = {0};
+    long code = net_request_timeout(url, "POST", json, g_token, &r, NULL, 6L, 14L);
+    free(json);
+
+    if (code == 200 && r.data && !response_looks_like_html(r.data)) {
+        cJSON *root = cJSON_Parse(r.data);
+        if (root) {
+            cJSON *active = cJSON_GetObjectItemCaseSensitive(root, "active");
+            curSeriesFavorite = cJSON_IsTrue(active) ? 1 : 0;
+            favoritesDirty = 1;
+            cJSON_Delete(root);
+            message_screen(curSeriesFavorite ? "Adicionado aos favoritos." : "Removido dos favoritos.",
+                           curSeriesFavorite ? "Agora aparece na aba Favoritos." : "A aba Favoritos sera atualizada ao voltar.");
+            membuf_free(&r);
+            return;
+        }
+    }
+
+    if (code == 403 && r.data) {
+        cJSON *root = cJSON_Parse(r.data);
+        const char *err = root ? json_str(root, "error", "") : "";
+        const char *kind = root ? json_str(root, "code", "") : "";
+        if (!strcmp(kind, "premium_required")) {
+            message_screen("Favoritos fazem parte do apoio.", "Use Conta > Colaborar com o projeto no celular.");
+        } else {
+            message_screen("Nao consegui favoritar.", err[0] ? err : "Acesso recusado pelo servidor.");
+        }
+        if (root) cJSON_Delete(root);
+        membuf_free(&r);
+        return;
+    }
+
+    if (code == 401) {
+        message_screen("Sessao expirada.", "Entre novamente para usar favoritos.");
+    } else {
+        message_screen("Nao consegui favoritar.", "Verifique internet/servidor e tente novamente.");
+    }
+    membuf_free(&r);
+}
+
 static void enter_series(int idx) {
     cJSON *s = cat_series_at(idx);
     if (!s) return;
@@ -3550,6 +3668,8 @@ static void enter_series(int idx) {
     if (g_ser) chapCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"));
     if (areaIdx != AREA_BOOKS) recompute_series_offline();
     g_chapters_back = screen;
+    curSeriesFavorite = catalogFavorites ? 1 : -1;
+    refresh_current_favorite_state();
     screen = SC_CHAPTERS;
 }
 
@@ -4691,7 +4811,7 @@ static void render_series(void) {
         draw_more_hint(catScroll, catCount, vis);
     }
     if (!catalogFavorites) draw_area_hint_line();
-    draw_footer(catalogFavorites ? "B/Biblioteca: voltar    Favoritos vem do site Meruem    X: alternar visual" :
+    draw_footer(catalogFavorites ? "B/Biblioteca: voltar    Favoritos sincronizados    X: alternar visual" :
                 (g_search[0] ? "Busca ativa: X ou B limpa a busca    Buscar tenta outro termo" : NULL));
     btn_draw(btn_prev()); btn_draw(btn_area()); btn_draw(btn_search());
     btn_draw(g_search[0] ? btn_clear_search() : btn_view_mode());
@@ -4788,11 +4908,10 @@ static void render_area_settings(void) {
 
 static void render_chapters(void) {
     draw_background();
-    char hd[200];
     int isBooks = areaIdx == AREA_BOOKS;
-    snprintf(hd, sizeof(hd), "%.20s (%d)", curSeriesTitle, chapCount);
     Btn orderBtn = btn_chap_order();
-    draw_topbar_reserved(hd, btn_back(), orderBtn.x);
+    draw_topbar_reserved(NULL, btn_back(), orderBtn.x);
+    btn_draw(btn_favorite_series());
     btn_draw(orderBtn);
 
     int vis = visible_rows();
@@ -4839,13 +4958,13 @@ static void render_chapters(void) {
     if (!isBooks) {
         btn_draw(btn_download_all());
         int soff = store_get_series_offline(curSeriesId);
-        const char *hint = soff == 2 ? "Serie ja baixada (X = rebaixar)   B: voltar"
-                         : soff == 1 ? "X = completar download   B: voltar"
-                                     : "X = baixar tudo offline   B: voltar";
+        const char *hint = soff == 2 ? "X rebaixar   - favorito   B voltar"
+                         : soff == 1 ? "X completar   - favorito   B voltar"
+                                     : "X offline   - favorito   B voltar";
         text_draw_fit(gRen, hint, btn_download_all().x + btn_download_all().w + 16, LH() - 41,
                       LW() - (btn_download_all().x + btn_download_all().w + 32), COL_DIM, 0);
     } else {
-        text_draw_fit(gRen, "A: baixar/ler livro   Y: inverter ordem   B: voltar", 18, LH() - 41, LW() - 36, COL_DIM, 0);
+        text_draw_fit(gRen, "A: baixar/ler livro   Y: ordem   -: favorito   B: voltar", 18, LH() - 41, LW() - 36, COL_DIM, 0);
     }
     btn_draw(btn_up()); btn_draw(btn_down());
 }
@@ -5300,7 +5419,15 @@ static void handle_tap(int lx, int ly) {
             }
         }
     } else if (screen == SC_CHAPTERS) {
-        if (btn_hit(btn_back(), lx, ly)) { screen = g_chapters_back; return; }
+        if (btn_hit(btn_back(), lx, ly)) {
+            if (favoritesDirty && g_chapters_back == SC_FAVORITES) {
+                favoritesDirty = 0;
+                load_favorites();
+            }
+            screen = g_chapters_back;
+            return;
+        }
+        if (btn_hit(btn_favorite_series(), lx, ly)) { toggle_current_favorite(); return; }
         if (areaIdx != AREA_BOOKS && btn_hit(btn_download_all(), lx, ly)) { offline_download_all_chapters(); return; }
         if (btn_hit(btn_chap_order(), lx, ly)) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; return; }
         if (btn_hit(btn_up(), lx, ly))   { chapScroll -= visible_rows(); if (chapScroll < 0) chapScroll = 0; return; }
@@ -5792,10 +5919,17 @@ int main(int argc, char **argv) {
                             else if (b == JOY_DOWN && chapSel < chapCount - 1) chapSel++;
                             else if (b == JOY_L) { chapSel -= visible_rows(); if (chapSel < 0) chapSel = 0; }
                             else if (b == JOY_R) { chapSel += visible_rows(); if (chapSel > chapCount - 1) chapSel = chapCount - 1; }
+                            else if (b == JOY_MINUS) { toggle_current_favorite(); }
                             else if (b == JOY_Y) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; }
                             else if (b == JOY_X && areaIdx != AREA_BOOKS) { offline_download_all_chapters(); }
                             else if (b == JOY_A && chapCount > 0) enter_reader(chapSel);
-                            else if (b == JOY_B) screen = g_chapters_back;
+                            else if (b == JOY_B) {
+                                if (favoritesDirty && g_chapters_back == SC_FAVORITES) {
+                                    favoritesDirty = 0;
+                                    load_favorites();
+                                }
+                                screen = g_chapters_back;
+                            }
                             if (chapSel < chapScroll) chapScroll = chapSel;
                             if (chapSel >= chapScroll + visible_rows()) chapScroll = chapSel - visible_rows() + 1;
                         } else if (screen == SC_CONTINUE) {

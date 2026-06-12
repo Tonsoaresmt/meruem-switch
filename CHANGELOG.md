@@ -3,6 +3,15 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.18.12
+- Agora e possivel favoritar ou remover uma obra dos favoritos direto pelo
+  Nintendo Switch.
+- A tela de capitulos ganhou o botao `Favoritar`/`Favorito` ao lado da ordem
+  `Mais novos`/`Mais antigos`, sem depender de abrir o site.
+- O app consulta o estado atual da obra ao abrir os capitulos, atualiza a aba
+  Favoritos ao voltar e mostra aviso claro quando a conta ainda nao tem acesso
+  ao recurso.
+
 ## v0.18.11
 - Instalador de atualizacao mais rapido no SD: depois de baixar o `.nro`, o app
   tenta trocar o arquivo por `rename` em vez de copiar os ~45 MB uma segunda vez.
