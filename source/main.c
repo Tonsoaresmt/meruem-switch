@@ -101,6 +101,17 @@ static char g_search[96] = {0};
 static int catViewMode = 0; // 0 = capas, 1 = lista compacta
 static int catalogRandomizeNext = 1;
 static int catalogTotalCache[AREA_COUNT] = {0};
+// Cache de sessao do catalogo por area: torna a REVISITA de area instantanea
+// (sem rede). 1a visita busca; voltar serve do cache ate o TTL expirar.
+#define CAT_CACHE_TTL_MS 180000   // 3 min: depois re-busca (re-embaralha)
+static cJSON *catCache[AREA_COUNT] = {0};
+static Uint32 catCacheTime[AREA_COUNT] = {0};
+static int catCachePage[AREA_COUNT] = {0};
+// Cache da ultima serie aberta: re-abrir a mesma serie fica instantaneo (sem rede).
+#define SER_CACHE_TTL_MS 120000
+static char g_serCacheId[96] = {0};
+static cJSON *g_serCache = NULL;
+static Uint32 g_serCacheTime = 0;
 static int g_area_hidden[AREA_COUNT] = {0};
 static int settingsAreaSel = 0;
 
@@ -121,6 +132,15 @@ static int catPage = 0, catTotal = 1, catCount = 0, catSel = 0, catScroll = 0;
 
 static cJSON *g_ser = NULL;
 static int chapCount = 0, chapSel = 0, chapScroll = 0;
+// Abas Capitulos/Volumes (igual ao site). chapCount continua sendo o total RAW;
+// chapVisCount/chapVisMap controlam o que aparece na tela conforme a aba.
+// chapTab: 0 = tudo, 1 = capitulos, 2 = volumes. Aparece so se ha MISTURA.
+#define CHAP_VIS_MAX 4096
+static int chapTab = 0;
+static int chapVisCount = 0;
+static int chapVisMap[CHAP_VIS_MAX];
+static int chapHasVolumes = 0, chapHasChapters = 0;
+static int chapVolCount = 0, chapChapCount = 0;
 static char curSeriesTitle[256] = {0};
 static char curSeriesId[96] = {0};
 static char curSeriesCover[640] = {0};
@@ -198,6 +218,15 @@ static char g_self_path[512] = {0};
 static int curChapIndex = -1;
 static float rd_zoom = READER_ZOOM_MIN;
 static float rd_pan_x = 0.0f, rd_pan_y = 0.0f;
+// Modo de ajuste da pagina (imagens). Auto = comportamento inteligente por
+// orientacao; os demais forcam um encaixe. Persistido por serie no store.
+#define FIT_AUTO    0
+#define FIT_CONTAIN 1
+#define FIT_WIDTH   2
+#define FIT_COUNT   3
+static int g_fit_mode = FIT_AUTO;
+static SDL_Joystick *g_joy = NULL;   // controle p/ ler analogicos (zoom/pan no reader)
+static int g_joy_axes = 0;           // >=4 = dois sticks (Pro/2 Joy-Con); 2 = 1 Joy-Con
 static Uint32 rd_lastTapTime = 0;   // p/ detectar toque duplo (zoom)
 static int rd_lastTapX = 0, rd_lastTapY = 0;
 static Uint32 reader_overlay_until = 0;
@@ -218,6 +247,9 @@ typedef struct {
 } CoverCacheEntry;
 
 static CoverCacheEntry g_cover_cache[COVER_CACHE_MAX];
+// Quantos downloads de capa podem INICIAR por frame. Cada um roda em thread e
+// reaproveita a conexao (CURLSH), entao a grade enche mais rapido sem travar.
+#define COVER_STARTS_PER_FRAME 3
 static int g_cover_started_this_frame = 0;
 
 typedef struct {
@@ -313,6 +345,14 @@ static int visible_rows(void) {
     int v = (LH() - LIST_Y - FOOTER_H - 12) / ROW_H;
     return v < 1 ? 1 : v;
 }
+// Forward declarations p/ as abas Volumes/Capitulos (definidas em render_chapters).
+static int chap_tab_extra_space(void);
+// Y inicial da lista de capitulos (desce qd ha abas Volumes/Capitulos).
+static int chap_list_y(void) { return LIST_Y + chap_tab_extra_space(); }
+static int chap_visible_rows(void) {
+    int v = (LH() - chap_list_y() - FOOTER_H - 12) / ROW_H;
+    return v < 1 ? 1 : v;
+}
 // ---- grade de capas (tela de series) ----
 static int grid_cols(void) { return g_portrait ? 3 : 5; }
 static int grid_gap(void) { return 14; }
@@ -337,11 +377,83 @@ static const char *json_str(cJSON *o, const char *k, const char *fb) {
     cJSON *it = cJSON_GetObjectItemCaseSensitive(o, k);
     return (cJSON_IsString(it) && it->valuestring) ? it->valuestring : fb;
 }
+
+// Numero de exibicao do capitulo: prefere displayNumber (parseado do titulo no
+// backend, igual ao site — "chapter 1" => "1") e cai pro number cru do Komga
+// so se ausente/vazio. Evita o "#9" na frente de "chapter 1".
+static const char *chap_num(cJSON *c) {
+    const char *d = json_str(c, "displayNumber", "");
+    if (d && d[0]) return d;
+    return json_str(c, "number", "?");
+}
 static cJSON *cat_series_at(int i) { return cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(g_cat, "series"), i); }
 static cJSON *chap_at_raw(int i) { return cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"), i); }
+// Heuristica do site (isVolumeBook em app.js):
+//   /\bvol(?:ume)?s?\.?\s*\d/i
+// Detecta "vol", "volume", "vols", "vol." seguido (com possivel espaco) de digito.
+static int chap_title_is_volume(const char *title) {
+    if (!title || !title[0]) return 0;
+    for (const char *p = title; *p; p++) {
+        // word boundary: comeco da string ou char nao-alfanumerico anterior
+        if (p != title) {
+            char b = p[-1];
+            if ((b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_') continue;
+        }
+        char c0 = p[0], c1 = p[1], c2 = p[2];
+        if ((c0 == 'v' || c0 == 'V') && (c1 == 'o' || c1 == 'O') && (c2 == 'l' || c2 == 'L')) {
+            const char *q = p + 3;
+            if ((q[0] == 'u' || q[0] == 'U') && (q[1] == 'm' || q[1] == 'M') && (q[2] == 'e' || q[2] == 'E')) q += 3;
+            if (q[0] == 's' || q[0] == 'S') q++;
+            if (q[0] == '.') q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q >= '0' && *q <= '9') return 1;
+        }
+    }
+    return 0;
+}
+static int chap_is_volume(cJSON *c) {
+    if (!c) return 0;
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(c, "isVolume");
+    if (cJSON_IsBool(v)) return cJSON_IsTrue(v);
+    return chap_title_is_volume(json_str(c, "title", ""));
+}
+
+// Reconstroi chapVisMap (espaco visivel -> indice raw) a partir de chapTab e
+// chapReversed. Chamado em enter_series, ao alternar ordem, ao alternar aba e
+// ao recarregar a serie.
+static void chap_rebuild_visible(void) {
+    chapVisCount = 0;
+    chapHasVolumes = 0; chapHasChapters = 0;
+    chapVolCount = 0; chapChapCount = 0;
+    if (!g_ser) return;
+    int n = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"));
+    for (int i = 0; i < n; i++) {
+        cJSON *c = chap_at_raw(i);
+        if (chap_is_volume(c)) { chapHasVolumes = 1; chapVolCount++; }
+        else                   { chapHasChapters = 1; chapChapCount++; }
+    }
+    int effectiveTab = chapTab;
+    // se a aba escolhida nao tem itens, cai pra "tudo"
+    if (effectiveTab == 1 && chapChapCount == 0) effectiveTab = 0;
+    if (effectiveTab == 2 && chapVolCount == 0)  effectiveTab = 0;
+    for (int i = 0; i < n; i++) {
+        int raw = chapReversed ? (n - 1 - i) : i;
+        cJSON *c = chap_at_raw(raw);
+        int isVol = chap_is_volume(c);
+        if (effectiveTab == 1 && isVol) continue;
+        if (effectiveTab == 2 && !isVol) continue;
+        if (chapVisCount < CHAP_VIS_MAX) chapVisMap[chapVisCount++] = raw;
+    }
+    if (chapSel >= chapVisCount) chapSel = chapVisCount > 0 ? chapVisCount - 1 : 0;
+    if (chapSel < 0) chapSel = 0;
+    if (chapScroll > chapVisCount) chapScroll = 0;
+    if (chapScroll < 0) chapScroll = 0;
+}
+
+// Indice visivel -> objeto cJSON, respeitando filtro de aba + ordem.
 static cJSON *chap_at(int i) {
-    if (chapReversed && chapCount > 0) return chap_at_raw(chapCount - 1 - i);
-    return chap_at_raw(i);
+    if (i < 0 || i >= chapVisCount) return NULL;
+    return chap_at_raw(chapVisMap[i]);
 }
 
 // ---------------- canvas / frame / rotacao ----------------
@@ -373,6 +485,7 @@ static void present_color(Uint8 r, Uint8 g, Uint8 b) {
 }
 static void toggle_orientation(void) {
     g_portrait = !g_portrait;
+    store_save_orientation(g_portrait);   // lembra a escolha entre sessoes
     ensure_canvas();
     doc_on_orientation_changed();
     if (catScroll > catCount) catScroll = 0;
@@ -458,6 +571,12 @@ static const char *doc_text_button_label(void) {
     return "Texto XG";
 }
 static Btn btn_doc_text(void) { Btn b = { LW() - 276, 8, 136, TB - 14, doc_text_button_label() }; return b; }
+static const char *fit_button_label(void) {
+    if (g_fit_mode == FIT_CONTAIN) return "Aj: Conter";
+    if (g_fit_mode == FIT_WIDTH)   return "Aj: Largura";
+    return "Aj: Auto";
+}
+static Btn btn_fit(void) { Btn b = { LW() - 276, 8, 136, TB - 14, fit_button_label() }; return b; }
 static Btn btn_continue(void) { Btn b = { 124, 8, 150, TB - 14, "Continuar" }; return b; }
 static Btn btn_favorites(void) { Btn b = { 282, 8, 140, TB - 14, "Favoritos" }; return b; }
 static Btn btn_catalog_home(void) { Btn b = { 282, 8, 140, TB - 14, "Biblioteca" }; return b; }
@@ -501,7 +620,7 @@ static Btn btn_switch_account(void) { Btn b = { 22, LH() - FOOTER_H - 72, 160, 5
 static Btn btn_qr_login(void) { Btn b = { 190, LH() - FOOTER_H - 72, 150, 50, "QR login" }; return b; }
 static Btn btn_pick_local(void) { Btn b = { 350, LH() - FOOTER_H - 72, 170, 50, "Escolher local" }; return b; }
 static Btn btn_default_local(void) { Btn b = { 530, LH() - FOOTER_H - 72, 180, 50, "Usar padrao" }; return b; }
-static Btn btn_offline(void) { Btn b = { LW() - 286, 8, 146, TB - 14, "Offline" }; return b; }
+static Btn btn_offline(void) { Btn b = { LW() - 432, 8, 146, TB - 14, "Offline" }; return b; }
 static Btn btn_downloads(void) { Btn b = { LW() - 286, 8, 146, TB - 14, "Baixados" }; return b; }
 static Btn btn_local_top(void) { Btn b = { LW() - 440, 8, 146, TB - 14, "Local" }; return b; }
 static Btn btn_delete_offline(void) { Btn b = { LW() - 286, 8, 146, TB - 14, "Apagar" }; return b; }
@@ -2628,8 +2747,8 @@ static SDL_Texture *cover_texture_for_key(const char *id, const char *cover) {
             }
         }
     }
-    if (empty < 0 || g_cover_started_this_frame) return NULL;
-    g_cover_started_this_frame = 1;
+    if (empty < 0 || g_cover_started_this_frame >= COVER_STARTS_PER_FRAME) return NULL;
+    g_cover_started_this_frame++;
     snprintf(g_cover_cache[empty].id, sizeof(g_cover_cache[empty].id), "%s", id);
     if (strncmp(cover, "http://", 7) == 0 || strncmp(cover, "https://", 8) == 0) {
         snprintf(g_cover_cache[empty].url, sizeof(g_cover_cache[empty].url), "%s", cover);
@@ -3361,8 +3480,33 @@ static void shuffle_catalog_series_if_needed(int shouldShuffle) {
     }
 }
 
+static void catalog_cache_clear_all(void) {
+    for (int i = 0; i < AREA_COUNT; i++) {
+        if (catCache[i]) { cJSON_Delete(catCache[i]); catCache[i] = NULL; }
+        catCacheTime[i] = 0;
+    }
+    if (g_serCache) { cJSON_Delete(g_serCache); g_serCache = NULL; }
+    g_serCacheId[0] = '\0';
+    g_serCacheTime = 0;
+}
+
+// Feedback imediato durante o fetch sincrono (1a visita / cache expirado), pra
+// nao parecer travado numa tela escura enquanto o Komga responde.
+static void draw_catalog_loading(void) {
+    begin_frame();
+    draw_background();
+    char msg[64];
+    const char *al = (areaIdx >= 0 && areaIdx < AREA_COUNT) ? AREA_LABELS[areaIdx] : "";
+    snprintf(msg, sizeof(msg), "Carregando %s...", al);
+    int w = 0, h = 0;
+    SDL_Texture *t = text_cached(gRen, msg, COL_HEAD, 1, &w, &h);
+    if (t) { SDL_Rect d = { (LW() - w) / 2, LH() / 2 - h / 2, w, h }; SDL_RenderCopy(gRen, t, NULL, &d); }
+    end_frame();
+}
+
 static void load_catalog(void) {
-    present_color(20, 20, 40);
+    // Sem clear escuro aqui: cache-hit renderiza direto (sem flash) e o caminho
+    // lento mostra "Carregando..." (draw_catalog_loading) antes do fetch.
     catalogFavorites = 0;
     catalogLoadFailed = 0;
     if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
@@ -3374,11 +3518,26 @@ static void load_catalog(void) {
         catalogLoadFailed = 1;
         return;
     }
+    // Revisita de area: serve do cache da sessao (instantaneo, sem rede). So no
+    // intuito de descoberta (troca de area / sair da busca), nunca na paginacao
+    // (prev/next nao setam catalogRandomizeNext).
+    if (catalogRandomizeNext && !g_search[0] && catCache[areaIdx] &&
+        (SDL_GetTicks() - catCacheTime[areaIdx]) < CAT_CACHE_TTL_MS) {
+        catalogRandomizeNext = 0;
+        g_cat = cJSON_Duplicate(catCache[areaIdx], 1);
+        catPage = catCachePage[areaIdx];
+        catTotal = g_cat ? json_int(g_cat, "totalPages", 1) : 1;
+        catCount = g_cat ? cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_cat, "series")) : 0;
+        if (catSel >= catCount) catSel = catCount > 0 ? catCount - 1 : 0;
+        if (catSel < 0) catSel = 0;
+        return;
+    }
     int shouldRandomize = catalogRandomizeNext && !g_search[0] && catPage == 0;
     int knownTotal = shouldRandomize ? catalogTotalCache[areaIdx] : 0;
     if (shouldRandomize && knownTotal > 1) catPage = catalog_random_page_away(knownTotal, 0);
     if (catalogRandomizeNext) catalogRandomizeNext = 0;
 
+    draw_catalog_loading();   // feedback imediato durante o fetch bloqueante
     g_cat = fetch_catalog_json_page(catPage, &catalogLoadFailed);
     if ((!g_cat || catalogLoadFailed) && !g_search[0] && catPage > 0) {
         if (g_cat) { cJSON_Delete(g_cat); g_cat = NULL; }
@@ -3411,6 +3570,13 @@ static void load_catalog(void) {
         catTotal = json_int(g_cat, "totalPages", 1);
         catCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_cat, "series"));
         if (!g_search[0] && catTotal > 1) catalogTotalCache[areaIdx] = catTotal;
+    }
+    // Guarda no cache da sessao (so navegacao normal) p/ revisita instantanea.
+    if (g_cat && !catalogLoadFailed && !g_search[0]) {
+        if (catCache[areaIdx]) cJSON_Delete(catCache[areaIdx]);
+        catCache[areaIdx] = cJSON_Duplicate(g_cat, 1);
+        catCacheTime[areaIdx] = SDL_GetTicks();
+        catCachePage[areaIdx] = catPage;
     }
     if (catSel >= catCount) catSel = catCount > 0 ? catCount - 1 : 0;
     if (catSel < 0) catSel = 0;
@@ -3655,17 +3821,30 @@ static void enter_series(int idx) {
     } else {
         curSeriesCover[0] = '\0';
     }
-    present_color(20, 20, 40);
     if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
-    char url[512];
-    if (areaIdx == AREA_BOOKS) snprintf(url, sizeof(url), "%s/switch/books/series/%s", g_server, id);
-    else                       snprintf(url, sizeof(url), "%s/switch/series/%s", g_server, id);
-    struct membuf r = {0};
-    long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
-    if (code == 200 && r.data) g_ser = cJSON_Parse(r.data);
-    membuf_free(&r);
-    chapCount = 0; chapSel = 0; chapScroll = 0;
+    // Cache da ultima serie: re-abrir a mesma serie fica instantaneo (sem rede).
+    if (g_serCache && strcmp(g_serCacheId, id) == 0 &&
+        (SDL_GetTicks() - g_serCacheTime) < SER_CACHE_TTL_MS) {
+        g_ser = cJSON_Duplicate(g_serCache, 1);
+    } else {
+        present_color(20, 20, 40);
+        char url[512];
+        if (areaIdx == AREA_BOOKS) snprintf(url, sizeof(url), "%s/switch/books/series/%s", g_server, id);
+        else                       snprintf(url, sizeof(url), "%s/switch/series/%s", g_server, id);
+        struct membuf r = {0};
+        long code = net_request_timeout(url, "GET", NULL, g_token, &r, NULL, 8L, 20L);
+        if (code == 200 && r.data) g_ser = cJSON_Parse(r.data);
+        membuf_free(&r);
+        if (g_ser) {   // guarda no cache da sessao
+            if (g_serCache) cJSON_Delete(g_serCache);
+            g_serCache = cJSON_Duplicate(g_ser, 1);
+            snprintf(g_serCacheId, sizeof(g_serCacheId), "%s", id);
+            g_serCacheTime = SDL_GetTicks();
+        }
+    }
+    chapCount = 0; chapSel = 0; chapScroll = 0; chapTab = 0;
     if (g_ser) chapCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"));
+    chap_rebuild_visible();
     if (areaIdx != AREA_BOOKS) recompute_series_offline();
     g_chapters_back = screen;
     curSeriesFavorite = catalogFavorites ? 1 : -1;
@@ -3810,7 +3989,7 @@ static int enter_doc_reader_from_chapter(cJSON *c, Screen back) {
     const char *id = json_str(c, "id", "");
     const char *file = json_str(c, "file", "");
     const char *fmt = json_str(c, "format", "pdf");
-    const char *num = json_str(c, "number", "?");
+    const char *num = chap_num(c);
     const char *ttl = json_str(c, "title", "");
     if (!id[0] || !file[0]) {
         message_screen("Livro sem arquivo para abrir.", "Atualize o servidor Meruem e tente novamente.");
@@ -3938,10 +4117,11 @@ static void enter_reader(int idx) {
     snprintf(pageBase, sizeof(pageBase), "%s%s", g_server, pb);
     pageCount = json_int(c, "pages", 1);
     if (pageCount < 1) pageCount = 1;
-    snprintf(curChapLabel, sizeof(curChapLabel), "#%s", json_str(c, "number", "?"));
+    snprintf(curChapLabel, sizeof(curChapLabel), "#%s", chap_num(c));
     snprintf(curBookId, sizeof(curBookId), "%s", json_str(c, "id", ""));
-    // O indice real no array (pra next-chapter funcionar certo):
-    curChapIndex = (chapReversed && chapCount > 0) ? (chapCount - 1 - idx) : idx;
+    // O indice real no array (pra next-chapter funcionar certo). idx vem do
+    // espaco VISIVEL (filtrado pela aba e ordem), entao mapeia via chapVisMap.
+    curChapIndex = (idx >= 0 && idx < chapVisCount) ? chapVisMap[idx] : idx;
     curPage = store_get_progress(curBookId);
     if (curPage > pageCount) curPage = pageCount;
     if (curPage < 1) curPage = 1;
@@ -4028,15 +4208,20 @@ static void enter_reader_from_record_source(const char *bookId, ReaderSource sou
         if (code == 200 && r.data) g_ser = cJSON_Parse(r.data);
         membuf_free(&r);
         chapCount = 0; chapSel = 0; chapScroll = 0;
+        int foundRaw = -1;
         if (g_ser) {
             chapCount = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(g_ser, "chapters"));
             for (int i = 0; i < chapCount; i++) {
                 cJSON *c = chap_at_raw(i);
                 if (c && strcmp(json_str(c, "id", ""), bookId) == 0) {
                     curChapIndex = i;
-                    chapSel = i;
+                    foundRaw = i;
                     break;
                 }
+            }
+            chap_rebuild_visible();
+            if (foundRaw >= 0) {
+                for (int i = 0; i < chapVisCount; i++) if (chapVisMap[i] == foundRaw) { chapSel = i; break; }
             }
         }
     }
@@ -4314,8 +4499,28 @@ static int reader_page_is_tall(int tw, int th) {
     if (tw <= 0 || th <= 0) return 0;
     return (float)th / (float)tw >= READER_TALL_RATIO;
 }
-// Escala base: "conter" (caber inteira) no caso normal; "preencher largura" nas
-// tiras altas, pra nao ficarem minusculas e exigirem zoom (que borra).
+// Pagina normal de manga em PAISAGEM usa "preencher largura" (escolha do
+// usuario): enche a largura da tela e rola na vertical, em vez de "conter" a
+// pagina inteira (que numa tela larga fica pequena, com vao preto nas laterais).
+// So vale fora de DOC, fora de tira alta (webtoon ja preenche largura) e fora
+// do modo retrato (onde "conter" ja preenche a largura naturalmente).
+// Auto: pagina normal de manga em PAISAGEM preenche largura (rola vertical).
+static int reader_fill_width_mode(int tw, int th) {
+    return g_reader_source != READER_SRC_DOC && !g_portrait && !reader_page_is_tall(tw, th);
+}
+// Preenche a largura de fato neste frame, ja considerando o modo de ajuste
+// escolhido pelo usuario. Webtoon SEMPRE preenche largura; depois vale o modo
+// explicito (Largura/Conter); Auto cai no comportamento por orientacao. Usado
+// por scroll/reset/pan p/ saber se ha transbordo vertical a rolar.
+static int reader_effective_fill_width(int tw, int th) {
+    if (g_reader_source == READER_SRC_DOC) return 0;
+    if (reader_page_is_tall(tw, th)) return 1;
+    if (g_fit_mode == FIT_WIDTH) return 1;
+    if (g_fit_mode == FIT_CONTAIN) return 0;
+    return reader_fill_width_mode(tw, th);   // Auto
+}
+// Escala base: "conter" (caber inteira) ou "preencher largura". Tiras altas e o
+// modo Largura/paisagem preenchem; o resto contem. Documentos tem caminho proprio.
 static float reader_base_scale(int tw, int th) {
     if (tw <= 0 || th <= 0) return 1.0f;
     SDL_Rect view;
@@ -4325,8 +4530,11 @@ static float reader_base_scale(int tw, int th) {
     if (g_reader_source == READER_SRC_DOC && g_doc_page_fill_view) return sw > sh ? sw : sh;
     if (g_reader_source == READER_SRC_DOC && !g_doc_reflowable) return sw * doc_pdf_width_factor();
     if (g_reader_source == READER_SRC_DOC) return sw;
-    if (reader_page_is_tall(tw, th)) return sw;
-    return sw < sh ? sw : sh;
+    if (reader_page_is_tall(tw, th)) return sw;          // webtoon: sempre largura
+    if (g_fit_mode == FIT_CONTAIN) return sw < sh ? sw : sh;
+    if (g_fit_mode == FIT_WIDTH)   return sw;
+    if (reader_fill_width_mode(tw, th)) return sw;       // Auto: paisagem
+    return sw < sh ? sw : sh;                            // Auto: retrato
 }
 static void reader_clamp_pan(void) {
     int tw = 0, th = 0;
@@ -4348,6 +4556,9 @@ static void reader_clamp_pan(void) {
 }
 
 static void reader_reset_view(void) {
+    // Modo de ajuste salvo desta serie (Auto se nao houver). Barato (lookup em
+    // memoria) e idempotente com reader_cycle_fit, que salva antes de chamar aqui.
+    g_fit_mode = store_get_fit_mode(curSeriesId, FIT_AUTO);
     rd_zoom = reader_default_zoom();
     rd_pan_x = rd_pan_y = 0.0f;
     // Tiras altas e documentos comecam no topo, nao no meio da pagina.
@@ -4355,12 +4566,75 @@ static void reader_reset_view(void) {
     if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &tw, &th);
     SDL_Rect view;
     reader_view_rect(&view);
-    if (reader_page_is_tall(tw, th) || (g_reader_source == READER_SRC_DOC && !g_doc_page_fill_view)) {
+    if (reader_effective_fill_width(tw, th) ||
+        (g_reader_source == READER_SRC_DOC && !g_doc_page_fill_view)) {
         float h = th * reader_base_scale(tw, th) * rd_zoom;
         if (h > view.h) rd_pan_y = (h - (float)view.h) * 0.5f;   // +maxY = topo
     }
     reader_reset_touch();
     reader_show_overlay();
+}
+
+// Cicla o modo de ajuste (Auto -> Conter -> Largura), persiste por serie e
+// re-encaixa a pagina. So faz sentido em fontes de imagem (nao em PDF/EPUB).
+static void reader_cycle_fit(void) {
+    g_fit_mode = (g_fit_mode + 1) % FIT_COUNT;
+    if (curSeriesId[0]) store_set_fit_mode(curSeriesId, g_fit_mode);
+    reader_reset_view();
+}
+
+// Analogicos no reader (chamado 1x por frame quando screen == SC_READER):
+//   R-stick (eixos 2/3) = zoom in/out  | L-stick (eixos 0/1) = mover (pan)
+// Compatibilidade com 1 Joy-Con: se so houver 1 stick (2 eixos), ele faz o pan
+// e o zoom continua disponivel pelo touch (pinca/duplo toque). Convencao "camera":
+// empurrar pra cima mostra o topo, pra direita mostra a direita.
+static int reader_analog_update(void) {
+    if (!g_joy) return 0;
+    if (g_reader_source == READER_SRC_DOC && g_doc_reflowable) return 0;  // EPUB (reflow) usa tamanho de texto; PDF (fixo) tem zoom livre, igual imagem
+    if (!pageTex) return 0;
+
+    int naxes = SDL_JoystickNumAxes(g_joy);
+    if (naxes <= 0) return 0;
+    g_joy_axes = naxes;
+    int twoSticks = (naxes >= 4);
+
+    const int DEAD = 7000;          // ~21% de zona morta
+    const float RANGE = 32767.0f;
+    int changed = 0;
+
+    SDL_JoystickUpdate();
+
+    // ---- ZOOM: R-stick Y (so com dois sticks) ----
+    if (twoSticks) {
+        int ry = SDL_JoystickGetAxis(g_joy, 3);
+        if (ry > DEAD || ry < -DEAD) {
+            float v = (float)ry / RANGE;          // -1..1 (cima = negativo)
+            float oldZoom = rd_zoom;
+            rd_zoom *= (1.0f - v * 0.045f);       // cima = zoom in
+            if (rd_zoom < READER_ZOOM_MIN) rd_zoom = READER_ZOOM_MIN;
+            if (rd_zoom > READER_ZOOM_MAX) rd_zoom = READER_ZOOM_MAX;
+            if (rd_zoom != oldZoom) {
+                float k = oldZoom > 0.0f ? rd_zoom / oldZoom : 1.0f;  // zoom ao redor do centro
+                rd_pan_x *= k;
+                rd_pan_y *= k;
+                changed = 1;
+            }
+        }
+    }
+
+    // ---- PAN: L-stick (dois sticks) ou stick unico (1 Joy-Con) ----
+    int px = SDL_JoystickGetAxis(g_joy, 0);
+    int py = SDL_JoystickGetAxis(g_joy, 1);
+    const float panStep = 20.0f;    // px/frame em deflexao total
+    if (px > DEAD || px < -DEAD) { rd_pan_x -= ((float)px / RANGE) * panStep; changed = 1; }
+    if (py > DEAD || py < -DEAD) { rd_pan_y -= ((float)py / RANGE) * panStep; changed = 1; }
+
+    if (changed) {
+        reader_clamp_pan();
+        reader_show_overlay();
+        g_last_activity = SDL_GetTicks();
+    }
+    return changed;
 }
 
 static int doc_engine_init(void) {
@@ -4664,7 +4938,7 @@ static void reader_scroll_or_turn(int dir) {
     float h = th * reader_base_scale(tw, th) * rd_zoom;
     float maxY = h > view.h ? (h - (float)view.h) * 0.5f : 0.0f;
     int scrollable = maxY > 1.0f &&
-                     (reader_page_is_tall(tw, th) ||
+                     (reader_effective_fill_width(tw, th) ||
                       (g_reader_source == READER_SRC_DOC && !g_doc_page_fill_view) ||
                       rd_zoom > reader_default_zoom() + 0.01f);
     if (scrollable) {
@@ -4689,7 +4963,7 @@ static void reader_open_next_chapter_now(void) {
     snprintf(pageBase, sizeof(pageBase), "%s%s", g_server, pb);
     pageCount = json_int(c, "pages", 1);
     if (pageCount < 1) pageCount = 1;
-    snprintf(curChapLabel, sizeof(curChapLabel), "#%s", json_str(c, "number", "?"));
+    snprintf(curChapLabel, sizeof(curChapLabel), "#%s", chap_num(c));
     snprintf(curBookId, sizeof(curBookId), "%s", json_str(c, "id", ""));
     curChapIndex = nextReal;
     curPage = 1;
@@ -4906,6 +5180,44 @@ static void render_area_settings(void) {
     draw_footer("A/toque: alternar visibilidade    B: voltar    ZL/ZR: girar");
 }
 
+// Abas "Capitulos N" / "Volumes M" no topo da lista (so aparecem se ha mistura
+// dos dois tipos na serie). Igual ao site. Toque universal — funciona em
+// qualquer setup de controle (Joy-Con unico, Pro, pareado).
+static int chap_tabs_visible(void) { return chapHasChapters && chapHasVolumes; }
+static int chap_tabs_y(void) { return TB + 8; }
+static int chap_tabs_h(void) { return 36; }
+static int chap_tab_extra_space(void) { return chap_tabs_visible() ? (chap_tabs_h() + 12) : 0; }
+static Btn chap_tab_pill(int idx) {
+    int totalW = LW() - 48;
+    int gap = 10;
+    int w = (totalW - gap * 2) / 3;
+    Btn b = { 24 + idx * (w + gap), chap_tabs_y(), w, chap_tabs_h(), "" };
+    return b;
+}
+static void draw_chap_tabs(void) {
+    if (!chap_tabs_visible()) return;
+    char lbl0[40], lbl1[40], lbl2[40];
+    snprintf(lbl0, sizeof(lbl0), "Tudo %d", chapVisCount > 0 && chapTab == 0 ? chapVisCount : (chapChapCount + chapVolCount));
+    snprintf(lbl1, sizeof(lbl1), "Capitulos %d", chapChapCount);
+    snprintf(lbl2, sizeof(lbl2), "Volumes %d", chapVolCount);
+    const char *labels[3] = { lbl0, lbl1, lbl2 };
+    for (int i = 0; i < 3; i++) {
+        Btn p = chap_tab_pill(i);
+        int active = (chapTab == i);
+        SDL_Rect r = { p.x, p.y, p.w, p.h };
+        SDL_SetRenderDrawColor(gRen, active ? 92 : 38, active ? 152 : 58, active ? 76 : 96, 255);
+        SDL_RenderFillRect(gRen, &r);
+        SDL_SetRenderDrawColor(gRen, active ? 158 : 80, active ? 251 : 110, active ? 114 : 140, 255);
+        SDL_RenderDrawRect(gRen, &r);
+        int tw = 0, th = 0;
+        SDL_Texture *ttex = text_cached(gRen, labels[i], active ? COL_SEL : COL_TEXT, 0, &tw, &th);
+        if (ttex) {
+            SDL_Rect dst = { p.x + (p.w - tw) / 2, p.y + (p.h - th) / 2, tw, th };
+            SDL_RenderCopy(gRen, ttex, NULL, &dst);
+        }
+    }
+}
+
 static void render_chapters(void) {
     draw_background();
     int isBooks = areaIdx == AREA_BOOKS;
@@ -4913,17 +5225,19 @@ static void render_chapters(void) {
     draw_topbar_reserved(NULL, btn_back(), orderBtn.x);
     btn_draw(btn_favorite_series());
     btn_draw(orderBtn);
+    draw_chap_tabs();
 
-    int vis = visible_rows();
-    if (chapCount == 0) draw_empty_state(isBooks ? "Sem livros" : "Sem capitulos",
+    int vis = chap_visible_rows();
+    int listY0 = chap_list_y();
+    if (chapVisCount == 0) draw_empty_state(isBooks ? "Sem livros" : "Sem capitulos",
                                          isBooks ? "Esta obra nao retornou PDF/EPUB suportado." : "Esta serie nao retornou capitulos.");
     for (int i = 0; i < vis; i++) {
         int idx = chapScroll + i;
-        if (idx >= chapCount) break;
-        int y = LIST_Y + i * ROW_H;
+        if (idx >= chapVisCount) break;
+        int y = listY0 + i * ROW_H;
         draw_row_shell(y, idx == chapSel);
         cJSON *c = chap_at(idx);
-        const char *num = json_str(c, "number", "?");
+        const char *num = chap_num(c);
         const char *tt = json_str(c, "title", "");
         const char *bid = json_str(c, "id", "");
         int prog = store_get_progress(bid);
@@ -4953,7 +5267,7 @@ static void render_chapters(void) {
         text_draw_fit(gRen, row, 24, y + 8, LW() - 56, idx == chapSel ? COL_SEL : COL_TEXT, 0);
         text_draw_fit(gRen, meta, 24, y + 34, LW() - 56, COL_SOFT, 0);
     }
-    draw_scrollbar(chapScroll, chapCount, vis);
+    draw_scrollbar(chapScroll, chapVisCount, vis);
     draw_footer(NULL);
     if (!isBooks) {
         btn_draw(btn_download_all());
@@ -5206,23 +5520,31 @@ static void render_reader(void) {
         btn_draw(btn_back());
         if (g_reader_source == READER_SRC_REMOTE) btn_draw(btn_offline());
         if (g_reader_source == READER_SRC_DOC) btn_draw(btn_doc_text());
+        else btn_draw(btn_fit());   // imagens: botao de ajuste (Auto/Conter/Largura)
         btn_draw(btn_rotate());
         char pc[160];
         int rightX = g_reader_source == READER_SRC_REMOTE ? btn_offline().x :
-                     (g_reader_source == READER_SRC_DOC ? btn_doc_text().x : btn_rotate().x);
+                     (g_reader_source == READER_SRC_DOC ? btn_doc_text().x : btn_fit().x);
         int maxPcW = rightX - (btn_back().x + btn_back().w + 24);
         snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
         text_draw_fit(gRen, pc, btn_back().x + btn_back().w + 14, 12, maxPcW, COL_SEL, 0);
         (void)maxPcW;
+        // Dica contextual: R/L rolam (modo Largura/zoom/webtoon) ou viram pagina.
+        int ptw = 0, pth = 0;
+        if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &ptw, &pth);
+        const char *rl = (reader_effective_fill_width(ptw, pth) ||
+                          rd_zoom > reader_default_zoom() + 0.01f) ? "rolar" : "pagina";
         if (g_reader_source == READER_SRC_REMOTE) {
             int off = offline_count_pages(curBookId, pageCount);
-            char st[80];
-            snprintf(st, sizeof(st), "X: offline  %d/%d no SD", off, pageCount);
+            char st[120];
+            snprintf(st, sizeof(st), "X: offline %d/%d   Y: ajuste   R/L: %s", off, pageCount, rl);
             text_draw_fit(gRen, st, 18, LH() - 48, LW() - 36, off == pageCount ? COL_HEAD : COL_DIM, 0);
         } else if (g_reader_source == READER_SRC_DOC) {
             // Em livros, nao desenhamos legenda inferior para nao cobrir texto.
         } else {
-            text_draw_fit(gRen, "Local: lendo direto do SD", 18, LH() - 48, LW() - 36, COL_DIM, 0);
+            char st[120];
+            snprintf(st, sizeof(st), "Local (SD)   Y: ajuste   R/L: %s", rl);
+            text_draw_fit(gRen, st, 18, LH() - 48, LW() - 36, COL_DIM, 0);
         }
     }
     if (next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) {
@@ -5237,7 +5559,7 @@ static void render_reader(void) {
         snprintf(msg, sizeof(msg), "Proximo capitulo em %ds", left);
         text_draw_fit(gRen, msg, box.x + 32, box.y + 24, box.w - 64, COL_HEAD, 1);
         cJSON *next = chap_at_real(curChapIndex + 1);
-        snprintf(msg, sizeof(msg), "Capitulo #%s", json_str(next, "number", "?"));
+        snprintf(msg, sizeof(msg), "Capitulo #%s", chap_num(next));
         text_draw_fit(gRen, msg, box.x + 32, box.y + 62, box.w - 64, COL_SEL, 0);
         btn_draw(btn_next_open());
         btn_draw(btn_next_cancel());
@@ -5429,18 +5751,26 @@ static void handle_tap(int lx, int ly) {
         }
         if (btn_hit(btn_favorite_series(), lx, ly)) { toggle_current_favorite(); return; }
         if (areaIdx != AREA_BOOKS && btn_hit(btn_download_all(), lx, ly)) { offline_download_all_chapters(); return; }
-        if (btn_hit(btn_chap_order(), lx, ly)) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; return; }
+        if (btn_hit(btn_chap_order(), lx, ly)) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; chap_rebuild_visible(); return; }
+        if (chap_tabs_visible()) {
+            for (int i = 0; i < 3; i++) {
+                if (btn_hit(chap_tab_pill(i), lx, ly)) {
+                    if (chapTab != i) { chapTab = i; chapSel = 0; chapScroll = 0; chap_rebuild_visible(); }
+                    return;
+                }
+            }
+        }
         if (btn_hit(btn_up(), lx, ly))   { chapScroll -= visible_rows(); if (chapScroll < 0) chapScroll = 0; return; }
         if (btn_hit(btn_down(), lx, ly)) {
-            int maxs = chapCount - visible_rows();
+            int maxs = chapVisCount - visible_rows();
             if (maxs < 0) maxs = 0;
             chapScroll += visible_rows();
             if (chapScroll > maxs) chapScroll = maxs;
             return;
         }
-        if (ly >= LIST_Y && ly < LIST_Y + visible_rows() * ROW_H) {
-            int idx = chapScroll + (ly - LIST_Y) / ROW_H;
-            if (idx >= 0 && idx < chapCount) { chapSel = idx; enter_reader(idx); }
+        if (ly >= chap_list_y() && ly < chap_list_y() + chap_visible_rows() * ROW_H) {
+            int idx = chapScroll + (ly - chap_list_y()) / ROW_H;
+            if (idx >= 0 && idx < chapVisCount) { chapSel = idx; enter_reader(idx); }
         }
     } else if (screen == SC_CONTINUE) {
         if (btn_hit(btn_library(), lx, ly)) { switch_area_to(areaIdx); return; }
@@ -5495,10 +5825,11 @@ static void handle_tap(int lx, int ly) {
             if (btn_hit(btn_back(), lx, ly)) { reader_leave(); screen = g_reader_back; return; }
             if (g_reader_source == READER_SRC_REMOTE && btn_hit(btn_offline(), lx, ly)) { offline_download_current_chapter(); return; }
             if (g_reader_source == READER_SRC_DOC && btn_hit(btn_doc_text(), lx, ly)) { doc_cycle_text_size(); return; }
+            if (g_reader_source != READER_SRC_DOC && btn_hit(btn_fit(), lx, ly)) { reader_cycle_fit(); return; }
             if (btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); reader_clamp_pan(); reader_show_overlay(); return; }
             return;
         }
-        if (rd_zoom <= reader_default_zoom() + 0.01f || g_reader_source == READER_SRC_DOC) {
+        if (rd_zoom <= reader_default_zoom() + 0.01f || (g_reader_source == READER_SRC_DOC && g_doc_reflowable)) {
             if (lx < LW() * 34 / 100) { reader_scroll_or_turn(-1); return; }
             if (lx > LW() * 66 / 100) { reader_scroll_or_turn(1); return; }
         }
@@ -5561,7 +5892,7 @@ static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
     int totalMove = abs(lx - readerTouches[slot].startX) + abs(ly - readerTouches[slot].startY);
     if (totalMove > readerSwipeMoved) readerSwipeMoved = totalMove;
 
-    if (reader_touch_count() == 2 && readerPinching && g_reader_source != READER_SRC_DOC) {
+    if (reader_touch_count() == 2 && readerPinching && !(g_reader_source == READER_SRC_DOC && g_doc_reflowable)) {
         float dist = reader_touch_dist();
         if (readerPinchBaseDist < 8.0f) readerPinchBaseDist = dist;
         float ratio = readerPinchBaseDist > 0.0f ? dist / readerPinchBaseDist : 1.0f;
@@ -5579,8 +5910,9 @@ static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
     if (reader_touch_count() == 1) {
         int ptw = 0, pth = 0;
         if (pageTex) SDL_QueryTexture(pageTex, NULL, NULL, &ptw, &pth);
-        // Arrasta com 1 dedo quando ha zoom OU quando a pagina e alta (rola a tira).
-        if (rd_zoom > reader_default_zoom() + 0.01f || reader_page_is_tall(ptw, pth) ||
+        // Arrasta com 1 dedo quando ha zoom, quando a pagina e alta (rola a tira)
+        // ou no modo paisagem "preencher largura" (rola a pagina na vertical).
+        if (rd_zoom > reader_default_zoom() + 0.01f || reader_effective_fill_width(ptw, pth) ||
             (g_reader_source == READER_SRC_DOC && !g_doc_page_fill_view)) {
             rd_pan_x += dx;
             rd_pan_y += dy;
@@ -5591,7 +5923,7 @@ static void reader_touch_move(SDL_FingerID id, float nx, float ny) {
 
 // Toque duplo: alterna entre 1x e ~2.2x, centralizando no ponto tocado.
 static void reader_double_tap_zoom(int lx, int ly) {
-    if (g_reader_source == READER_SRC_DOC) {
+    if (g_reader_source == READER_SRC_DOC && g_doc_reflowable) {  // EPUB nao tem zoom; PDF sim
         reader_show_overlay();
         return;
     }
@@ -5633,7 +5965,7 @@ static void reader_touch_end(SDL_FingerID id, float nx, float ny) {
     if (reader_touch_count() == 0) {
         if (!wasPinching) {
             int adx = abs(dx), ady = abs(dy);
-            if ((rd_zoom <= reader_default_zoom() + 0.01f || g_reader_source == READER_SRC_DOC) && adx > 70 && adx > ady + 30) {
+            if ((rd_zoom <= reader_default_zoom() + 0.01f || (g_reader_source == READER_SRC_DOC && g_doc_reflowable)) && adx > 70 && adx > ady + 30) {
                 reader_scroll_or_turn(dx < 0 ? 1 : -1);
             } else if (readerSwipeMoved <= TAP_THRESH) {
                 Uint32 now = SDL_GetTicks();
@@ -5641,7 +5973,7 @@ static void reader_touch_end(SDL_FingerID id, float nx, float ny) {
                 int centerZone = (lx > LW() * 34 / 100 && lx < LW() * 66 / 100);
                 int isDouble = (now - rd_lastTapTime < 320) &&
                                (abs(lx - rd_lastTapX) < 80) && (abs(ly - rd_lastTapY) < 80);
-                if (g_reader_source != READER_SRC_DOC && isDouble && (zoomed || centerZone)) {
+                if (!(g_reader_source == READER_SRC_DOC && g_doc_reflowable) && isDouble && (zoomed || centerZone)) {
                     rd_lastTapTime = 0;
                     reader_double_tap_zoom(lx, ly);
                 } else {
@@ -5681,7 +6013,7 @@ static void scroll_current_view(int delta) {
     else if (screen == SC_CONTINUE) { scroll = &contScroll; count = contN; }
     else if (screen == SC_OFFLINE) { scroll = &offlineScroll; count = offlineN; }
     else if (screen == SC_LOCAL || screen == SC_LOCAL_PICKER) { scroll = &localScroll; count = localN; }
-    else if (screen == SC_CHAPTERS) { scroll = &chapScroll; count = chapCount; }
+    else if (screen == SC_CHAPTERS) { scroll = &chapScroll; count = chapVisCount; }
     else return;
     int maxs = count - vis;
     if (maxs < 0) maxs = 0;
@@ -5720,7 +6052,7 @@ static void handle_drag(int curLY) {
     else if (screen == SC_CONTINUE)  { scroll = &contScroll; count = contN; }
     else if (screen == SC_OFFLINE)  { scroll = &offlineScroll; count = offlineN; }
     else if (screen == SC_LOCAL || screen == SC_LOCAL_PICKER)  { scroll = &localScroll; count = localN; }
-    else if (screen == SC_CHAPTERS)  { scroll = &chapScroll; count = chapCount; }
+    else if (screen == SC_CHAPTERS)  { scroll = &chapScroll; count = chapVisCount; }
     else return;
     dragAccum += (float)(curLY - lastLY);
     while (dragAccum >= ROW_H)  { (*scroll)--; dragAccum -= ROW_H; }
@@ -5764,7 +6096,8 @@ int main(int argc, char **argv) {
     SDL_SetRenderDrawBlendMode(gRen, SDL_BLENDMODE_BLEND);
     SDL_InitSubSystem(SDL_INIT_JOYSTICK);
     SDL_JoystickEventState(SDL_ENABLE);
-    SDL_JoystickOpen(0);
+    g_joy = SDL_JoystickOpen(0);
+    if (g_joy) g_joy_axes = SDL_JoystickNumAxes(g_joy);
 
     int text_ok = (text_init() == 0);
     int doc_ok = doc_engine_init();
@@ -5783,6 +6116,8 @@ int main(int argc, char **argv) {
     } else {
         curl_ok = 1;
         store_init();
+        // Restaura a ultima orientacao escolhida (antes era sempre retrato no boot).
+        { int savedPortrait; if (store_load_orientation(&savedPortrait) && savedPortrait != g_portrait) { g_portrait = savedPortrait; ensure_canvas(); } }
         load_area_visibility();
         books_ensure_dir();
         local_root_load_config();
@@ -5906,7 +6241,7 @@ int main(int argc, char **argv) {
                                 if (g_search[0]) clear_catalog_search();
                                 else toggle_catalog_view();
                             }
-                            else if (b == JOY_MINUS) { store_clear_token(); if (g_token) { free(g_token); g_token = NULL; } if (!authenticate()) { running = 0; break; } catPage = 0; catSel = 0; load_catalog(); }
+                            else if (b == JOY_MINUS) { store_clear_token(); if (g_token) { free(g_token); g_token = NULL; } if (!authenticate()) { running = 0; break; } catalog_cache_clear_all(); catPage = 0; catSel = 0; load_catalog(); }
                             else if (b == JOY_B) {
                                 if (g_search[0] && !catalogFavorites) clear_catalog_search();
                                 else if (catalogFavorites) return_to_library();
@@ -5916,13 +6251,15 @@ int main(int argc, char **argv) {
                             clamp_catalog_scroll_to_selection();
                         } else if (screen == SC_CHAPTERS) {
                             if (b == JOY_UP && chapSel > 0) chapSel--;
-                            else if (b == JOY_DOWN && chapSel < chapCount - 1) chapSel++;
+                            else if (b == JOY_DOWN && chapSel < chapVisCount - 1) chapSel++;
+                            else if (b == JOY_DRIGHT && chap_tabs_visible()) { chapTab = (chapTab + 1) % 3; chapSel = 0; chapScroll = 0; chap_rebuild_visible(); }
+                            else if (b == JOY_DLEFT && chap_tabs_visible()) { chapTab = (chapTab + 2) % 3; chapSel = 0; chapScroll = 0; chap_rebuild_visible(); }
                             else if (b == JOY_L) { chapSel -= visible_rows(); if (chapSel < 0) chapSel = 0; }
-                            else if (b == JOY_R) { chapSel += visible_rows(); if (chapSel > chapCount - 1) chapSel = chapCount - 1; }
+                            else if (b == JOY_R) { chapSel += visible_rows(); if (chapSel > chapVisCount - 1) chapSel = chapVisCount - 1; }
                             else if (b == JOY_MINUS) { toggle_current_favorite(); }
-                            else if (b == JOY_Y) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; }
+                            else if (b == JOY_Y) { chapReversed = !chapReversed; chapSel = 0; chapScroll = 0; chap_rebuild_visible(); }
                             else if (b == JOY_X && areaIdx != AREA_BOOKS) { offline_download_all_chapters(); }
-                            else if (b == JOY_A && chapCount > 0) enter_reader(chapSel);
+                            else if (b == JOY_A && chapVisCount > 0) enter_reader(chapSel);
                             else if (b == JOY_B) {
                                 if (favoritesDirty && g_chapters_back == SC_FAVORITES) {
                                     favoritesDirty = 0;
@@ -6021,7 +6358,7 @@ int main(int argc, char **argv) {
                             if (b == JOY_A && next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) reader_open_next_chapter_now();
                             else if (b == JOY_X && next_prompt_started) { next_prompt_cancelled = 1; next_prompt_started = 0; reader_show_overlay(); }
                             else if (b == JOY_X && g_reader_source == READER_SRC_REMOTE) offline_download_current_chapter();
-                            else if (b == JOY_Y && g_reader_source == READER_SRC_DOC) doc_cycle_text_size();
+                            else if (b == JOY_Y) { if (g_reader_source == READER_SRC_DOC) doc_cycle_text_size(); else reader_cycle_fit(); }
                             else if (b == JOY_DOWN) reader_scroll_or_turn(1);
                             else if (b == JOY_UP) reader_scroll_or_turn(-1);
                             else if (b == JOY_R || b == JOY_DRIGHT || b == JOY_A) reader_scroll_or_turn(1);
@@ -6032,7 +6369,8 @@ int main(int argc, char **argv) {
                 }
 
                 reader_tick();
-                int animating = app_is_animating();
+                int analogActive = (screen == SC_READER) ? reader_analog_update() : 0;
+                int animating = app_is_animating() || analogActive;
                 Uint32 nowMs = SDL_GetTicks();
                 if (hadEvent || animating || firstFrame || (nowMs - lastRender >= 1000)) {
                     firstFrame = 0;
@@ -6060,6 +6398,7 @@ cleanup:
     page_cache_clear();
     if (g_ser)   cJSON_Delete(g_ser);
     if (g_cat)   cJSON_Delete(g_cat);
+    catalog_cache_clear_all();
     cover_cache_clear();
     if (g_token) free(g_token);
     if (curl_ok) net_exit();

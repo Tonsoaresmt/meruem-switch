@@ -27,6 +27,14 @@ void store_save_last_area(const char *area);
 int  store_load_area_hidden_mask(unsigned *mask);
 void store_save_area_hidden_mask(unsigned mask);
 
+// Orientacao da tela: 1 = retrato, 0 = paisagem. Persiste entre sessoes.
+int  store_load_orientation(int *portrait);
+void store_save_orientation(int portrait);
+
+// Modo de ajuste da pagina por serie: 0 = Auto, 1 = Conter, 2 = Largura.
+int  store_get_fit_mode(const char *seriesId, int fallback);
+void store_set_fit_mode(const char *seriesId, int mode);
+
 // Estado offline de uma serie: 0 = nada, 1 = parcial, 2 = baixada inteira.
 int  store_get_series_offline(const char *seriesId);
 void store_set_series_offline(const char *seriesId, int state);

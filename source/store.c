@@ -17,11 +17,14 @@
 #define LOCAL_F  DIR_APP "/local_root.txt"
 #define AREA_F   DIR_APP "/last_area.txt"
 #define AREAS_F  DIR_APP "/hidden_areas.txt"
+#define ORIENT_F DIR_APP "/orientation.txt"
 #define PROG_F   DIR_APP "/progress.json"
 #define OFFSER_F DIR_APP "/offline_series.json"
+#define FITM_F   DIR_APP "/fit_modes.json"
 
 static cJSON *g_prog = NULL;
 static cJSON *g_offser = NULL;   // { seriesId: estado offline 0/1/2 }
+static cJSON *g_fitm = NULL;     // { seriesId: modo de ajuste 0=Auto 1=Conter 2=Largura }
 
 void store_init(void) {
     mkdir(DIR_BASE, 0777);
@@ -47,6 +50,35 @@ void store_init(void) {
         fclose(fo);
     }
     if (!g_offser) g_offser = cJSON_CreateObject();
+
+    FILE *ff = fopen(FITM_F, "rb");
+    if (ff) {
+        fseek(ff, 0, SEEK_END); long n3 = ftell(ff); fseek(ff, 0, SEEK_SET);
+        if (n3 > 0 && n3 < 2 * 1024 * 1024) {
+            char *b3 = (char *)malloc((size_t)n3 + 1);
+            if (b3) { size_t rd = fread(b3, 1, (size_t)n3, ff); b3[rd] = '\0'; g_fitm = cJSON_Parse(b3); free(b3); }
+        }
+        fclose(ff);
+    }
+    if (!g_fitm) g_fitm = cJSON_CreateObject();
+}
+
+int store_get_fit_mode(const char *seriesId, int fallback) {
+    if (!g_fitm || !seriesId || !seriesId[0]) return fallback;
+    cJSON *it = cJSON_GetObjectItemCaseSensitive(g_fitm, seriesId);
+    return cJSON_IsNumber(it) ? it->valueint : fallback;
+}
+
+void store_set_fit_mode(const char *seriesId, int mode) {
+    if (!g_fitm || !seriesId || !seriesId[0]) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(g_fitm, seriesId);
+    if (mode > 0) cJSON_AddNumberToObject(g_fitm, seriesId, mode);  // 0=Auto = default, nao guarda
+    char *s = cJSON_PrintUnformatted(g_fitm);
+    if (s) {
+        FILE *f = fopen(FITM_F, "wb");
+        if (f) { fwrite(s, 1, strlen(s), f); fclose(f); }
+        free(s);
+    }
 }
 
 int store_get_series_offline(const char *seriesId) {
@@ -259,6 +291,29 @@ void store_save_area_hidden_mask(unsigned mask) {
     if (!f) return;
     snprintf(buf, sizeof(buf), "%u", mask);
     fwrite(buf, 1, strlen(buf), f);
+    fclose(f);
+}
+
+int store_load_orientation(int *portrait) {
+    FILE *f;
+    char buf[16];
+    size_t n;
+    if (!portrait) return 0;
+    f = fopen(ORIENT_F, "rb");
+    if (!f) return 0;
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    trim_line(buf);
+    if (!buf[0]) return 0;
+    *portrait = (int)strtol(buf, NULL, 10) ? 1 : 0;
+    return 1;
+}
+
+void store_save_orientation(int portrait) {
+    FILE *f = fopen(ORIENT_F, "wb");
+    if (!f) return;
+    fwrite(portrait ? "1" : "0", 1, 1, f);
     fclose(f);
 }
 
