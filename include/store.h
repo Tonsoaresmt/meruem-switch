@@ -31,6 +31,10 @@ void store_save_area_hidden_mask(unsigned mask);
 int  store_load_orientation(int *portrait);
 void store_save_orientation(int portrait);
 
+// Leitura de livros: 1 = modo noturno em PDF/EPUB, 0 = pagina original.
+int  store_load_doc_night(int *enabled);
+void store_save_doc_night(int enabled);
+
 // Modo de ajuste da pagina por serie: 0 = Auto, 1 = Conter, 2 = Largura.
 int  store_get_fit_mode(const char *seriesId, int fallback);
 void store_set_fit_mode(const char *seriesId, int mode);

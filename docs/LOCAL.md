@@ -57,6 +57,7 @@ Arquivos locais usam o mesmo leitor do conteudo online:
 - zoom por pinca;
 - cache/preparo de paginas de imagem quando aplicavel;
 - tela de loading;
+- modo noturno em PDF/EPUB para paginas brancas;
 - progresso de leitura.
 
 ## Manhwa e Webtoon

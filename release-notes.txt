@@ -1,14 +1,12 @@
-Meruem v0.18.12
+Meruem v0.19.1
 
-Favoritos pelo Switch
-- Agora e possivel favoritar ou remover uma obra dos favoritos direto pelo
-  Nintendo Switch.
-- Na tela de capitulos, o topo ganhou o botao `Favoritar`/`Favorito`, ao lado
-  de `Mais novos`/`Mais antigos`.
-- O app sincroniza o estado com o servidor ao abrir a obra e atualiza a aba
-  Favoritos quando voce volta.
-- Se a conta ainda nao tiver acesso ao recurso, o app mostra uma mensagem clara
-  orientando a colaborar com o projeto pelo celular.
+Modo noturno para livros
+- Agora livros PDF/EPUB podem alternar entre pagina clara e modo noturno.
+- Use o botao `Noite`/`Claro` no topo do leitor, ou aperte `X`.
+- A preferencia fica salva no SD para continuar igual depois.
+- Capas e paginas coloridas sao preservadas no visual original sempre que o app
+  identifica que nao sao paginas comuns de leitura.
 
-Tambem mantem: livros PDF/EPUB online e local, webtoon/manhwa rolavel, login
-por QR, areas ocultaveis, leitura offline/local e atualizacao pelo proprio app.
+Tambem mantem: favoritos pelo Switch, livros PDF/EPUB online e local,
+webtoon/manhwa rolavel, login por QR, areas ocultaveis, leitura offline/local e
+atualizacao pelo proprio app.

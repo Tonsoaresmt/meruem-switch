@@ -18,6 +18,7 @@
 #define AREA_F   DIR_APP "/last_area.txt"
 #define AREAS_F  DIR_APP "/hidden_areas.txt"
 #define ORIENT_F DIR_APP "/orientation.txt"
+#define DOCNIGHT_F DIR_APP "/doc_night.txt"
 #define PROG_F   DIR_APP "/progress.json"
 #define OFFSER_F DIR_APP "/offline_series.json"
 #define FITM_F   DIR_APP "/fit_modes.json"
@@ -314,6 +315,29 @@ void store_save_orientation(int portrait) {
     FILE *f = fopen(ORIENT_F, "wb");
     if (!f) return;
     fwrite(portrait ? "1" : "0", 1, 1, f);
+    fclose(f);
+}
+
+int store_load_doc_night(int *enabled) {
+    FILE *f;
+    char buf[16];
+    size_t n;
+    if (!enabled) return 0;
+    f = fopen(DOCNIGHT_F, "rb");
+    if (!f) return 0;
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    trim_line(buf);
+    if (!buf[0]) return 0;
+    *enabled = (int)strtol(buf, NULL, 10) ? 1 : 0;
+    return 1;
+}
+
+void store_save_doc_night(int enabled) {
+    FILE *f = fopen(DOCNIGHT_F, "wb");
+    if (!f) return;
+    fwrite(enabled ? "1" : "0", 1, 1, f);
     fclose(f);
 }
 

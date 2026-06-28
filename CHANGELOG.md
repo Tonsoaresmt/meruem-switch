@@ -3,6 +3,13 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.19.1
+- Livros PDF/EPUB ganharam modo noturno, alternado pelo botao `Noite`/`Claro`
+  no topo ou pelo `X` no controle.
+- O modo noturno tenta aplicar fundo escuro apenas em paginas de leitura com
+  fundo claro, preservando capas e paginas coloridas no visual original.
+- A escolha fica salva no SD e volta igual ao reabrir o app.
+
 ## v0.18.12
 - Agora e possivel favoritar ou remover uma obra dos favoritos direto pelo
   Nintendo Switch.

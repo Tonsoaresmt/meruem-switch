@@ -213,6 +213,7 @@ static int g_doc_reflowable = 0;
 static int g_doc_failed_page = 0;
 static int g_doc_text_scale = DOC_TEXT_SCALE_DEFAULT;   // 0 P, 1 M, 2 G, 3 XG
 static int g_doc_page_fill_view = 0;
+static int g_doc_night_mode = 0;
 static int reader_pending_view_reset = 0;
 static char g_self_path[512] = {0};
 static int curChapIndex = -1;
@@ -324,6 +325,7 @@ static void reader_open_next_chapter_now(void);
 static int reader_has_next_chapter(void);
 static int doc_open_file(const char *path);
 static void doc_close(void);
+static void doc_free_page_texture(void);
 static void doc_load_saved_scale(void);
 static int doc_render_current_page(void);
 static void doc_on_orientation_changed(void);
@@ -571,6 +573,7 @@ static const char *doc_text_button_label(void) {
     return "Texto XG";
 }
 static Btn btn_doc_text(void) { Btn b = { LW() - 276, 8, 136, TB - 14, doc_text_button_label() }; return b; }
+static Btn btn_doc_night(void) { Btn b = { LW() - 416, 8, 130, TB - 14, g_doc_night_mode ? "Claro" : "Noite" }; return b; }
 static const char *fit_button_label(void) {
     if (g_fit_mode == FIT_CONTAIN) return "Aj: Conter";
     if (g_fit_mode == FIT_WIDTH)   return "Aj: Largura";
@@ -2859,6 +2862,10 @@ static int success_screen(const char *l1, const char *l2) {
     SDL_Color green = { 78, 190, 132, 255 };
     return modal_wait_loop("Meruem", l1, l2, NULL, green, "Toque ou A = continuar", 0);
 }
+static int update_success_screen(const char *l1, const char *l2, const char *l3) {
+    SDL_Color green = { 78, 190, 132, 255 };
+    return modal_wait_loop("Atualizacao Meruem", l1, l2, l3, green, "Toque ou A = continuar", 0);
+}
 static int info_screen(const char *l1, const char *l2) {
     SDL_Color blue = { 96, 154, 232, 255 };
     return modal_wait_loop("Meruem", l1, l2, NULL, blue, "Toque ou A = continuar", 0);
@@ -3335,7 +3342,11 @@ static int maybe_install_update(void) {
         return 0;   // nao marca: permite tentar de novo no proximo boot
     }
     store_save_update_seen(info.latest_version);
-    success_screen("Atualizacao instalada!", "Feche e abra o Meruem novamente.");
+    if (info.release_notes[0]) snprintf(line3, sizeof(line3), "O que mudou: %.190s", info.release_notes);
+    else snprintf(line3, sizeof(line3), "O que mudou: melhorias e correcoes desta versao.");
+    update_success_screen("Atualizacao instalada com sucesso.",
+                          "Feche e abra o Meruem novamente para usar.",
+                          line3);
     return 1;
 }
 
@@ -4678,6 +4689,58 @@ static void doc_load_saved_scale(void) {
     if (g_doc_text_scale >= DOC_TEXT_SCALE_COUNT) g_doc_text_scale = DOC_TEXT_SCALE_COUNT - 1;
 }
 
+static int doc_pixmap_looks_like_reading_page(fz_pixmap *pix, int textChars, int hasArtCrop) {
+    if (!pix || pix->w <= 0 || pix->h <= 0 || pix->n < 3 || pix->stride < pix->w * pix->n) return 0;
+    if (hasArtCrop) return 0;              // capa/arte deve manter as cores originais.
+
+    int stepX = pix->w / 64;
+    int stepY = pix->h / 96;
+    if (stepX < 1) stepX = 1;
+    if (stepY < 1) stepY = 1;
+    int total = 0, bright = 0, dark = 0, colorful = 0;
+    for (int y = 0; y < pix->h; y += stepY) {
+        const unsigned char *row = pix->samples + (size_t)y * (size_t)pix->stride;
+        for (int x = 0; x < pix->w; x += stepX) {
+            const unsigned char *p = row + (size_t)x * (size_t)pix->n;
+            int r = p[0], g = p[1], b = p[2];
+            int maxc = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            int minc = r < g ? (r < b ? r : b) : (g < b ? g : b);
+            int lum = (r * 30 + g * 59 + b * 11) / 100;
+            total++;
+            if (r > 235 && g > 235 && b > 235) bright++;
+            if (lum < 95) dark++;
+            if (maxc - minc > 45 && lum > 70 && lum < 235) colorful++;
+        }
+    }
+    if (total <= 0) return 0;
+    int brightPct = bright * 100 / total;
+    int darkPct = dark * 100 / total;
+    int colorfulPct = colorful * 100 / total;
+    // Mesmo com texto extraivel, confirma que a pagina parece folha clara.
+    // Isso evita tingir capas/ilustracoes coloridas que tambem tenham texto.
+    if (textChars > 60) return brightPct >= 35 && colorfulPct <= 28;
+    return brightPct >= 48 && darkPct >= 1 && colorfulPct <= 18;
+}
+
+static void doc_apply_night_pixmap(fz_pixmap *pix, int textChars, int hasArtCrop) {
+    if (!g_doc_night_mode) return;
+    if (!doc_pixmap_looks_like_reading_page(pix, textChars, hasArtCrop)) return;
+    // Mapeia preto -> texto quente claro e branco -> fundo escuro, mantendo
+    // anti-aliasing e tons intermediarios sem precisar redesenhar o PDF/EPUB.
+    fz_tint_pixmap(g_doc_ctx, pix, 0xd8d0b8, 0x10141d);
+}
+
+static void doc_toggle_night_mode(void) {
+    if (g_reader_source != READER_SRC_DOC) return;
+    g_doc_night_mode = !g_doc_night_mode;
+    store_save_doc_night(g_doc_night_mode);
+    if (g_doc) {
+        doc_free_page_texture();
+        doc_render_current_page();
+    }
+    reader_show_overlay();
+}
+
 static void doc_engine_exit(void) {
     doc_close();
     if (g_doc_ctx) {
@@ -4758,11 +4821,12 @@ static int doc_render_current_page(void) {
         if (ss < 1.0f) ss = 1.0f;
         pix = fz_new_pixmap_from_page(g_doc_ctx, page, fz_scale(fit * ss, fit * ss),
                                       fz_device_rgb(g_doc_ctx), 0);
+        SDL_Rect crop;
+        int hasArtCrop = doc_compute_art_crop(pix, &crop, textChars);
+        doc_apply_night_pixmap(pix, textChars, hasArtCrop);
         SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
             pix->samples, pix->w, pix->h, 24, pix->stride, SDL_PIXELFORMAT_RGB24);
         if (surf) {
-            SDL_Rect crop;
-            int hasArtCrop = doc_compute_art_crop(pix, &crop, textChars);
             SDL_Surface *useSurf = surf;
             SDL_Surface *cropSurf = NULL;
             if (hasArtCrop && crop.w > 0 && crop.h > 0) {
@@ -5519,12 +5583,12 @@ static void render_reader(void) {
         SDL_RenderFillRect(gRen, &bar);
         btn_draw(btn_back());
         if (g_reader_source == READER_SRC_REMOTE) btn_draw(btn_offline());
-        if (g_reader_source == READER_SRC_DOC) btn_draw(btn_doc_text());
+        if (g_reader_source == READER_SRC_DOC) { btn_draw(btn_doc_night()); btn_draw(btn_doc_text()); }
         else btn_draw(btn_fit());   // imagens: botao de ajuste (Auto/Conter/Largura)
         btn_draw(btn_rotate());
         char pc[160];
         int rightX = g_reader_source == READER_SRC_REMOTE ? btn_offline().x :
-                     (g_reader_source == READER_SRC_DOC ? btn_doc_text().x : btn_fit().x);
+                     (g_reader_source == READER_SRC_DOC ? btn_doc_night().x : btn_fit().x);
         int maxPcW = rightX - (btn_back().x + btn_back().w + 24);
         snprintf(pc, sizeof(pc), "%s  %d/%d", curChapLabel, curPage, pageCount);
         text_draw_fit(gRen, pc, btn_back().x + btn_back().w + 14, 12, maxPcW, COL_SEL, 0);
@@ -5824,6 +5888,7 @@ static void handle_tap(int lx, int ly) {
         if (overlay && ly < TB) {
             if (btn_hit(btn_back(), lx, ly)) { reader_leave(); screen = g_reader_back; return; }
             if (g_reader_source == READER_SRC_REMOTE && btn_hit(btn_offline(), lx, ly)) { offline_download_current_chapter(); return; }
+            if (g_reader_source == READER_SRC_DOC && btn_hit(btn_doc_night(), lx, ly)) { doc_toggle_night_mode(); return; }
             if (g_reader_source == READER_SRC_DOC && btn_hit(btn_doc_text(), lx, ly)) { doc_cycle_text_size(); return; }
             if (g_reader_source != READER_SRC_DOC && btn_hit(btn_fit(), lx, ly)) { reader_cycle_fit(); return; }
             if (btn_hit(btn_rotate(), lx, ly)) { toggle_orientation(); reader_clamp_pan(); reader_show_overlay(); return; }
@@ -6118,6 +6183,7 @@ int main(int argc, char **argv) {
         store_init();
         // Restaura a ultima orientacao escolhida (antes era sempre retrato no boot).
         { int savedPortrait; if (store_load_orientation(&savedPortrait) && savedPortrait != g_portrait) { g_portrait = savedPortrait; ensure_canvas(); } }
+        { int savedNight; if (store_load_doc_night(&savedNight)) g_doc_night_mode = savedNight ? 1 : 0; }
         load_area_visibility();
         books_ensure_dir();
         local_root_load_config();
@@ -6357,6 +6423,7 @@ int main(int argc, char **argv) {
                         } else {
                             if (b == JOY_A && next_prompt_started && !next_prompt_cancelled && reader_has_next_chapter()) reader_open_next_chapter_now();
                             else if (b == JOY_X && next_prompt_started) { next_prompt_cancelled = 1; next_prompt_started = 0; reader_show_overlay(); }
+                            else if (b == JOY_X && g_reader_source == READER_SRC_DOC) doc_toggle_night_mode();
                             else if (b == JOY_X && g_reader_source == READER_SRC_REMOTE) offline_download_current_chapter();
                             else if (b == JOY_Y) { if (g_reader_source == READER_SRC_DOC) doc_cycle_text_size(); else reader_cycle_fit(); }
                             else if (b == JOY_DOWN) reader_scroll_or_turn(1);

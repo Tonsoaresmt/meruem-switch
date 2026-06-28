@@ -81,6 +81,7 @@ caso de duvida, consulte a tela de planos dentro do Meruem.
 - Area Local para CBZ e pastas de imagens do proprio usuario no SD.
 - Area Livros para baixar e ler PDF/EPUB do Meruem no SD do Switch.
 - Pasta local `sdmc:/Livros` para PDF/EPUB do proprio usuario no dispositivo.
+- Modo noturno em PDF/EPUB para reduzir brilho de paginas brancas.
 - Ultima area usada lembrada ao reabrir o app.
 - Catalogo online com variacao de pagina inicial para descobrir obras novas.
 - Modo capas e modo lista.
@@ -135,6 +136,7 @@ Leitor:
 - arrastar com um dedo: mover imagem quando esta com zoom;
 - `B`: voltar;
 - `Y`: em PDF/EPUB, alterna tamanho do texto/zoom;
+- `X`: em PDF/EPUB, alterna modo noturno/claro;
 - `ZL/ZR`: girar tela.
 
 ## Atualizacoes
