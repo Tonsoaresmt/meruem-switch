@@ -1,0 +1,13 @@
+Meruem Switch 0.19.3
+
+Melhora o download do Nplay sem login apos auditoria do fluxo.
+
+- Confirmacao por toque apenas em Baixar agora, evitando download por toque acidental fora dos botoes.
+- Voltar por B/+ e toque tambem nos avisos de erro e sucesso.
+- Verificacao de integridade com progresso e cancelamento.
+- Mensagens claras para certificado TLS/data-hora, arquivo indisponivel e limite do GitHub.
+- Validacoes adicionais de release, destino e recuperacao de backup quando o SD falha.
+
+Acesso: tela inicial > Outros apps: baixar Nplay (sem login), ou botao -; tambem em Conta e ajustes > Outros apps.
+
+Validacao: 34 simulacoes das funcoes reais de navegacao/autenticacao; falhas de rede/SD e recuperacao; consulta/download publico real com NRO e SHA-256 verificados; build ARM64 com -Werror. Teste no Switch fisico permanece pendente.

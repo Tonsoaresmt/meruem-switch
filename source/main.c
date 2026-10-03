@@ -3142,9 +3142,9 @@ static void offline_download_all_chapters(void) {
     }
 }
 
-struct apps_progress_state { Uint32 last_frame; Btn cancel; };
+struct apps_progress_state { Uint32 last_frame; Btn cancel; enum other_app_phase phase; };
 
-static int apps_download_progress(uint32_t done, uint32_t total, void *userdata) {
+static int apps_download_progress(enum other_app_phase phase, uint32_t done, uint32_t total, void *userdata) {
     struct apps_progress_state *state = userdata;
     SDL_Event e;
     if (!appletMainLoop()) return 1;
@@ -3158,10 +3158,14 @@ static int apps_download_progress(uint32_t done, uint32_t total, void *userdata)
         }
     }
     Uint32 now = SDL_GetTicks();
-    if (now - state->last_frame < 100) return 0;
+    if (phase == state->phase && now - state->last_frame < 100) return 0;
     state->last_frame = now;
+    state->phase = phase;
     char line[160];
-    if (total) snprintf(line, sizeof(line), "%.1f / %.1f MB (%u%%)", done / 1048576.0, total / 1048576.0,
+    if (phase == APP_INSTALL) snprintf(line, sizeof(line), "Instalando no SD...");
+    else if (phase == APP_VERIFY) snprintf(line, sizeof(line), "Verificando integridade: %u%%",
+                        total ? (unsigned)((uint64_t)done * 100 / total) : 0);
+    else if (total) snprintf(line, sizeof(line), "%.1f / %.1f MB (%u%%)", done / 1048576.0, total / 1048576.0,
                         (unsigned)((uint64_t)done * 100 / total));
     else snprintf(line, sizeof(line), "Consultando a versao disponivel...");
     begin_frame();
@@ -3181,6 +3185,39 @@ static int apps_download_progress(uint32_t done, uint32_t total, void *userdata)
     btn_draw(state->cancel);
     draw_footer("B/+ cancelar  |  Conferindo integridade antes de instalar");
     end_frame();
+    return 0;
+}
+
+/* Explicit touch targets: touching a blank area never confirms installation. */
+static int apps_prompt(const char *title, const char *line1, const char *line2,
+                       const char *action) {
+    SDL_Event e;
+    Uint32 shown = SDL_GetTicks();
+    while (appletMainLoop()) {
+        Btn yes = {36, 380, LW() - 72, 54, action};
+        Btn back = {36, 450, LW() - 72, 48, "Voltar"};
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) return 0;
+            if (SDL_GetTicks() - shown < 400) continue;
+            if (e.type == SDL_JOYBUTTONDOWN) {
+                if (e.jbutton.button == JOY_B || e.jbutton.button == JOY_PLUS) return 0;
+                if (e.jbutton.button == JOY_A) return 1;
+            }
+            if (e.type == SDL_FINGERUP) {
+                int lx, ly;
+                screen_to_logical(e.tfinger.x, e.tfinger.y, &lx, &ly);
+                if (btn_hit(back, lx, ly)) return 0;
+                if (btn_hit(yes, lx, ly)) return 1;
+            }
+        }
+        begin_frame(); draw_background();
+        text_draw_fit(gRen, title, 36, 100, LW() - 72, COL_HEAD, 1);
+        text_draw_fit(gRen, line1, 36, 190, LW() - 72, COL_TEXT, 0);
+        text_draw_fit(gRen, line2, 36, 264, LW() - 72, COL_SOFT, 0);
+        btn_draw(yes); btn_draw(back);
+        draw_footer("A confirmar    B/+ voltar"); end_frame();
+        SDL_Delay(16);
+    }
     return 0;
 }
 
@@ -3209,26 +3246,23 @@ static void other_apps_screen(void) {
             }
         }
         if (start) {
-            struct apps_progress_state state = {0, {36, 380, LW() - 72, 54, "Cancelar"}};
+            struct apps_progress_state state = {0, {36, 380, LW() - 72, 54, "Cancelar"}, APP_CHECK};
             checked = 0;
             int rc = other_app_check(&release, apps_download_progress, &state, err, sizeof(err));
             if (!rc) {
                 checked = 1;
                 char details[160];
                 snprintf(details, sizeof(details), "Versao %s - %.1f MB. Baixar agora?", release.version, release.size / 1048576.0);
-                SDL_Color accent = {96, 154, 232, 255};
-                if (modal_wait_loop("Nplay", details, "Nao precisa de conta ou assinatura Meruem.",
-                                    "Sera salvo no SD e aberto pelo Homebrew Menu.", accent,
-                                    "A/toque = baixar    B/+ = voltar", 1)) {
+                if (apps_prompt("Baixar Nplay", details, "Sem conta Meruem. Instala em switch/Nplay/Nplay.nro.", "Baixar agora")) {
                     state.last_frame = 0;
                     rc = other_app_install(&release, apps_download_progress, &state, err, sizeof(err));
-                    if (!rc) modal_wait_loop("Nplay instalado!", "Feche o Meruem e abra Nplay no Homebrew Menu.",
-                                              "O aplicativo foi salvo em switch/Nplay/Nplay.nro.",
-                                              "As proximas atualizacoes podem ser feitas pelo Nplay.", accent,
-                                              "A/toque = continuar    B/+ = voltar", 1);
+                    if (!rc) apps_prompt("Nplay instalado!", "Feche o Meruem e abra Nplay no Homebrew Menu.",
+                                          "Arquivo salvo em switch/Nplay/Nplay.nro.", "Continuar");
                 }
             }
-            if (rc < 0) message_screen("Nao foi possivel baixar o Nplay.", err);
+            if (rc < 0) {
+                apps_prompt("Nao foi possivel baixar Nplay", err, "Volte ao menu para tentar novamente.", "Continuar");
+            }
             shown = SDL_GetTicks();
         }
         begin_frame();

@@ -3,6 +3,16 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.19.3
+- Fluxo do Nplay revisado: confirmacao por toque apenas nos botoes, com
+  Voltar/B/+ disponiveis tambem nos avisos de erro e sucesso.
+- Verificacao SHA-256 agora mostra progresso e aceita cancelamento.
+- Erros de TLS, arquivo indisponivel e limites do GitHub com mensagens claras.
+- Valida metadados completos e preserva backup com instrucao de recuperacao
+  quando o SD falha tambem durante o rollback.
+- Auditoria: 34 simulacoes de navegacao/autenticacao; falhas de rede/SD;
+  download publico real validado por tamanho, NRO e checksum.
+
 ## v0.19.2
 - Outros apps do desenvolvedor: baixar Nplay diretamente na tela inicial,
   sem login ou assinatura Meruem, por toque ou pelo botao `-`.

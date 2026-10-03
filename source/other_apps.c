@@ -17,6 +17,7 @@ struct transfer {
     other_app_progress progress;
     void *userdata;
     int cancelled;
+    enum other_app_phase phase;
 };
 
 static size_t receive(char *data, size_t size, size_t count, void *userdata) {
@@ -37,8 +38,8 @@ static size_t receive(char *data, size_t size, size_t count, void *userdata) {
 static int tick(void *userdata, curl_off_t total, curl_off_t now, curl_off_t up, curl_off_t uploaded) {
     struct transfer *t = userdata;
     (void)up; (void)uploaded; (void)total;
-    if (now > t->limit) return 1;
-    if (t->progress && t->progress((uint32_t)now, t->file ? t->limit : 0, t->userdata)) {
+    if (now < 0 || now > t->limit) return 1;
+    if (t->progress && t->progress(t->phase, (uint32_t)now, t->file ? t->limit : 0, t->userdata)) {
         t->cancelled = 1;
         return 1;
     }
@@ -79,7 +80,14 @@ static int request(const char *url, struct transfer *t, char *err, size_t errcap
     curl_easy_cleanup(curl);
     if (t->cancelled) return 1;
     if (result != CURLE_OK || code != 200) {
-        snprintf(err, errcap, "Falha de rede/SD (HTTP %ld, %s). Tente novamente.", code, curl_easy_strerror(result));
+        if (result == CURLE_PEER_FAILED_VERIFICATION)
+            snprintf(err, errcap, "Falha no certificado TLS. Confira data/hora e internet do Switch.");
+        else if (code == 403 || code == 429)
+            snprintf(err, errcap, "GitHub limitou o acesso (HTTP %ld). Volte e tente mais tarde.", code);
+        else if (code == 404)
+            snprintf(err, errcap, "Release/arquivo indisponivel no GitHub. Tente novamente depois.");
+        else
+            snprintf(err, errcap, "Falha de rede/SD (HTTP %ld, %s). Tente novamente.", code, curl_easy_strerror(result));
         return -1;
     }
     return 0;
@@ -88,6 +96,8 @@ static int request(const char *url, struct transfer *t, char *err, size_t errcap
 int other_app_check(struct other_app_release *out, other_app_progress progress,
                     void *userdata, char *err, size_t errcap) {
     struct transfer t = {0};
+    if (!out) { snprintf(err, errcap, "Destino da consulta invalido."); return -1; }
+    memset(out, 0, sizeof(*out));
     t.limit = 512 * 1024;
     t.progress = progress; t.userdata = userdata;
     t.json = malloc(t.limit + 1);
@@ -103,7 +113,9 @@ int other_app_check(struct other_app_release *out, other_app_progress progress,
     return rc;
 }
 
-static int hash_matches(const char *path, const char *expected) {
+/* 1 matches, 0 invalid, 2 cancelled. */
+static int hash_matches(const char *path, const char *expected, uint32_t total,
+                        other_app_progress progress, void *userdata) {
     unsigned char buf[32768], hash[32];
     char hex[65];
     FILE *f = fopen(path, "rb");
@@ -111,13 +123,19 @@ static int hash_matches(const char *path, const char *expected) {
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     int ok = mbedtls_sha256_starts_ret(&ctx, 0) == 0;
+    uint32_t done = 0;
+    int cancelled = 0;
     size_t n;
-    while (ok && (n = fread(buf, 1, sizeof(buf), f)) > 0)
+    while (ok && (n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        done += (uint32_t)n;
+        if (progress && progress(APP_VERIFY, done, total, userdata)) { cancelled = 1; break; }
         ok = mbedtls_sha256_update_ret(&ctx, buf, n) == 0;
+    }
     if (ferror(f)) ok = 0;
     fclose(f);
     if (ok) ok = mbedtls_sha256_finish_ret(&ctx, hash) == 0;
     mbedtls_sha256_free(&ctx);
+    if (cancelled) return 2;
     if (!ok) return 0;
     for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", hash[i]);
     return !strcmp(hex, expected);
@@ -128,32 +146,56 @@ int other_app_install(const struct other_app_release *release,
     const char *tmp = NPLAY_SD_ROOT "/Nplay/.Nplay.download";
     const char *bak = NPLAY_SD_ROOT "/Nplay/Nplay.nro.bak";
     struct transfer t = {0};
-    if (!release || release->size < 128 || release->size > NPLAY_MAX_BYTES) return -1;
+    const char *prefix = "https://github.com/Tonsoaresmt/nplay-switch/releases/download/";
+    if (!release || release->size < 128 || release->size > NPLAY_MAX_BYTES ||
+        strncmp(release->url, prefix, strlen(prefix)) ||
+        strlen(release->sha256) != 64) {
+        snprintf(err, errcap, "Dados de instalacao invalidos. Consulte a versao novamente."); return -1;
+    }
+    char expected_url[512];
+    snprintf(expected_url, sizeof(expected_url), "%s%s/Nplay.nro", prefix, release->version);
+    if (strcmp(release->url, expected_url) || strspn(release->sha256, "0123456789abcdefABCDEF") != 64) {
+        snprintf(err, errcap, "Arquivo ou checksum de instalacao invalido."); return -1;
+    }
     mkdir(NPLAY_SD_ROOT, 0777);
     if (mkdir(NPLAY_SD_ROOT "/Nplay", 0777) && errno != EEXIST) {
         snprintf(err, errcap, "Nao consegui criar a pasta do Nplay no SD."); return -1;
     }
     /* Recover an interrupted previous replacement before starting a new one. */
     struct stat st;
+    if ((!stat(NPLAY_TARGET, &st) && !S_ISREG(st.st_mode)) ||
+        (!stat(bak, &st) && !S_ISREG(st.st_mode))) {
+        snprintf(err, errcap, "Destino/backup no SD nao e um arquivo. Confira a pasta switch/Nplay."); return -1;
+    }
     if (stat(NPLAY_TARGET, &st) && errno == ENOENT && !stat(bak, &st) && rename(bak, NPLAY_TARGET)) {
         snprintf(err, errcap, "Nao consegui restaurar o aplicativo anterior."); return -1;
     }
     t.file = fopen(tmp, "wb");
     if (!t.file) { snprintf(err, errcap, "Nao consegui gravar no SD. Verifique espaco livre."); return -1; }
-    t.limit = release->size; t.progress = progress; t.userdata = userdata;
+    t.limit = release->size; t.progress = progress; t.userdata = userdata; t.phase = APP_DOWNLOAD;
     int rc = request(release->url, &t, err, errcap);
     if (fclose(t.file) && !rc) { snprintf(err, errcap, "Falha ao concluir a gravacao no SD."); rc = -1; }
-    if (!rc && (!other_app_valid_nro(tmp, release->size) || !hash_matches(tmp, release->sha256))) {
-        snprintf(err, errcap, "Arquivo incompleto ou diferente do original. Tente novamente."); rc = -1;
+    if (!rc) {
+        int match = other_app_valid_nro(tmp, release->size) ?
+            hash_matches(tmp, release->sha256, release->size, progress, userdata) : 0;
+        if (match == 2) rc = 1;
+        else if (!match) {
+            snprintf(err, errcap, "Arquivo incompleto ou diferente do original. Tente novamente."); rc = -1;
+        }
     }
     if (rc) { remove(tmp); return rc; }
+    if (progress && progress(APP_INSTALL, release->size, release->size, userdata)) { remove(tmp); return 1; }
     int had_old = !stat(NPLAY_TARGET, &st);
     if (had_old) {
         if (remove(bak) && errno != ENOENT) goto fail;
         if (rename(NPLAY_TARGET, bak)) goto fail;
     }
     if (rename(tmp, NPLAY_TARGET)) {
-        if (had_old) rename(bak, NPLAY_TARGET);
+        if (had_old && rename(bak, NPLAY_TARGET)) {
+            remove(tmp);
+            snprintf(err, errcap, "Falha no SD. Copia anterior em switch/Nplay/Nplay.nro.bak. Tente de novo.");
+            return -1;
+        }
         goto fail;
     }
     /* Keep one backup, including through interrupted SD writes. */

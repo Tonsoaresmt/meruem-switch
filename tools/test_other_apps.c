@@ -25,6 +25,14 @@ static void write_nro(unsigned char *bytes, size_t n) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2) {
+        FILE *f=fopen(argv[1],"rb"); assert(f);
+        char json[512*1024+1]; size_t n=fread(json,1,sizeof(json)-1,f); json[n]=0; fclose(f);
+        struct other_app_release r;
+        assert(other_app_parse_release(json,&r));
+        printf("PASS: live anonymous GitHub release accepted: %s, %u bytes\n",r.version,r.size);
+        return 0;
+    }
     if (argc == 3) {
         assert(other_app_valid_nro(argv[1], (uint32_t)strtoul(argv[2], NULL, 10)));
         puts("PASS: real release NRO structure and size");
@@ -36,6 +44,9 @@ int main(int argc, char **argv) {
     assert(strlen(r.sha256) == 64);
     assert(!other_app_parse_release("{}", &r));
     assert(!other_app_parse_release("not json", &r));
+    char trailing[1024]; snprintf(trailing,sizeof(trailing),"%s garbage",valid);
+    assert(!other_app_parse_release(trailing,&r));
+    assert(!other_app_parse_release("{\"tag_name\":\"v1\",\"assets\":{}}", &r));
     reject_field("name", cJSON_CreateString("Meruem.nro"));
     reject_field("browser_download_url", cJSON_CreateString("https://evil.example/Nplay.nro"));
     reject_field("browser_download_url", cJSON_CreateString("https://github.com/Tonsoaresmt/nplay-switch/releases/download/v1/Nplay.nro"));

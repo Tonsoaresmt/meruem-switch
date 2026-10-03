@@ -6,7 +6,7 @@
 
 int other_app_parse_release(const char *json, struct other_app_release *out) {
     const char *prefix = "https://github.com/Tonsoaresmt/nplay-switch/releases/download/";
-    cJSON *root = cJSON_Parse(json ? json : "");
+    cJSON *root = cJSON_ParseWithOpts(json ? json : "", NULL, 1);
     cJSON *asset;
     int ok = 0;
     if (!out) { cJSON_Delete(root); return 0; }
@@ -15,7 +15,9 @@ int other_app_parse_release(const char *json, struct other_app_release *out) {
         cJSON_IsTrue(cJSON_GetObjectItem(root, "prerelease"))) goto done;
     cJSON *tag = cJSON_GetObjectItemCaseSensitive(root, "tag_name");
     if (!cJSON_IsString(tag) || !tag->valuestring[0] || strlen(tag->valuestring) >= sizeof(out->version)) goto done;
-    cJSON_ArrayForEach(asset, cJSON_GetObjectItemCaseSensitive(root, "assets")) {
+    cJSON *assets = cJSON_GetObjectItemCaseSensitive(root, "assets");
+    if (!cJSON_IsArray(assets)) goto done;
+    cJSON_ArrayForEach(asset, assets) {
         cJSON *name = cJSON_GetObjectItemCaseSensitive(asset, "name");
         cJSON *url = cJSON_GetObjectItemCaseSensitive(asset, "browser_download_url");
         cJSON *size = cJSON_GetObjectItemCaseSensitive(asset, "size");

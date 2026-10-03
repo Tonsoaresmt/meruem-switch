@@ -15,8 +15,9 @@ struct other_app_release {
     char sha256[65];
     uint32_t size;
 };
+enum other_app_phase { APP_CHECK, APP_DOWNLOAD, APP_VERIFY, APP_INSTALL };
 /* Return nonzero to cancel; callbacks run on the calling/UI thread. */
-typedef int (*other_app_progress)(uint32_t done, uint32_t total, void *userdata);
+typedef int (*other_app_progress)(enum other_app_phase phase, uint32_t done, uint32_t total, void *userdata);
 int other_app_parse_release(const char *json, struct other_app_release *out);
 int other_app_valid_nro(const char *path, uint32_t expected_size);
 int other_app_check(struct other_app_release *out, other_app_progress progress,
