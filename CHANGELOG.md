@@ -3,6 +3,15 @@
 Versoes publicadas do Meruem Switch. Todas as releases (com o `Meruem.nro`)
 ficam em: <https://github.com/Tonsoaresmt/meruem-switch/releases>
 
+## v0.19.2
+- Outros apps do desenvolvedor: baixar Nplay diretamente na tela inicial,
+  sem login ou assinatura Meruem, por toque ou pelo botao `-`.
+- Atalho tambem em Conta e ajustes > Outros apps.
+- Download da release estavel com progresso/cancelamento, TLS validado,
+  verificacao de tamanho, formato NRO e SHA-256, e backup da instalacao anterior.
+- Tela inicial reorganizada para os botoes caberem em retrato e modo TV.
+- Inclui o modo noturno de livros da v0.19.1.
+
 ## v0.19.1
 - Livros PDF/EPUB ganharam modo noturno, alternado pelo botao `Noite`/`Claro`
   no topo ou pelo `X` no controle.

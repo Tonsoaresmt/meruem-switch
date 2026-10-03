@@ -30,6 +30,7 @@
 #include "text.h"
 #include "store.h"
 #include "update.h"
+#include "other_apps.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -621,6 +622,7 @@ static Btn btn_next_open(void) { Btn b = { LW()/2 - 210, LH()/2 + 44, 190, 46, "
 static Btn btn_next_cancel(void) { Btn b = { LW()/2 + 20, LH()/2 + 44, 170, 46, "Cancelar" }; return b; }
 static Btn btn_switch_account(void) { Btn b = { 22, LH() - FOOTER_H - 72, 160, 50, "Trocar conta" }; return b; }
 static Btn btn_qr_login(void) { Btn b = { 190, LH() - FOOTER_H - 72, 150, 50, "QR login" }; return b; }
+static Btn btn_other_apps(void) { Btn b = { 170, 8, 250, TB - 14, "Outros apps" }; return b; }
 static Btn btn_pick_local(void) { Btn b = { 350, LH() - FOOTER_H - 72, 170, 50, "Escolher local" }; return b; }
 static Btn btn_default_local(void) { Btn b = { 530, LH() - FOOTER_H - 72, 180, 50, "Usar padrao" }; return b; }
 static Btn btn_offline(void) { Btn b = { LW() - 432, 8, 146, TB - 14, "Offline" }; return b; }
@@ -3140,20 +3142,128 @@ static void offline_download_all_chapters(void) {
     }
 }
 
-// Tela de boas-vindas / login. Retorna: 0 = sair, 1 = entrar, 2 = trocar conta, 3 = offline/local, 4 = QR, 5 = criar/liberar.
+struct apps_progress_state { Uint32 last_frame; Btn cancel; };
+
+static int apps_download_progress(uint32_t done, uint32_t total, void *userdata) {
+    struct apps_progress_state *state = userdata;
+    SDL_Event e;
+    if (!appletMainLoop()) return 1;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) return 1;
+        if (e.type == SDL_JOYBUTTONDOWN && (e.jbutton.button == JOY_B || e.jbutton.button == JOY_PLUS)) return 1;
+        if (e.type == SDL_FINGERUP) {
+            int lx, ly;
+            screen_to_logical(e.tfinger.x, e.tfinger.y, &lx, &ly);
+            if (btn_hit(state->cancel, lx, ly)) return 1;
+        }
+    }
+    Uint32 now = SDL_GetTicks();
+    if (now - state->last_frame < 100) return 0;
+    state->last_frame = now;
+    char line[160];
+    if (total) snprintf(line, sizeof(line), "%.1f / %.1f MB (%u%%)", done / 1048576.0, total / 1048576.0,
+                        (unsigned)((uint64_t)done * 100 / total));
+    else snprintf(line, sizeof(line), "Consultando a versao disponivel...");
+    begin_frame();
+    draw_background();
+    text_draw_fit(gRen, "Nplay", 36, 100, LW() - 72, COL_HEAD, 1);
+    text_draw_fit(gRen, line, 36, 170, LW() - 72, COL_TEXT, 0);
+    text_draw_fit(gRen, "Ao terminar, abra pelo Homebrew Menu.", 36, 220, LW() - 72, COL_SOFT, 0);
+    SDL_Rect track = { 36, 290, LW() - 72, 20 };
+    SDL_SetRenderDrawColor(gRen, 40, 48, 64, 255);
+    SDL_RenderFillRect(gRen, &track);
+    if (total) {
+        SDL_Rect fill = track;
+        fill.w = (int)((uint64_t)track.w * (done > total ? total : done) / total);
+        SDL_SetRenderDrawColor(gRen, 96, 154, 232, 255);
+        SDL_RenderFillRect(gRen, &fill);
+    }
+    btn_draw(state->cancel);
+    draw_footer("B/+ cancelar  |  Conferindo integridade antes de instalar");
+    end_frame();
+    return 0;
+}
+
+static void other_apps_screen(void) {
+    SDL_Event e;
+    struct other_app_release release = {0};
+    int checked = 0;
+    char err[256] = {0};
+    Uint32 shown = SDL_GetTicks();
+    while (appletMainLoop()) {
+        Btn download = { 36, 380, LW() - 72, 54, checked ? "Baixar / atualizar Nplay" : "Baixar Nplay" };
+        Btn back = { 36, 450, LW() - 72, 48, "Voltar" };
+        int start = 0;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) return;
+            if (SDL_GetTicks() - shown < 400) continue;
+            if (e.type == SDL_JOYBUTTONDOWN) {
+                if (e.jbutton.button == JOY_B || e.jbutton.button == JOY_PLUS) return;
+                if (e.jbutton.button == JOY_A) start = 1;
+            }
+            if (e.type == SDL_FINGERUP) {
+                int lx, ly;
+                screen_to_logical(e.tfinger.x, e.tfinger.y, &lx, &ly);
+                if (btn_hit(back, lx, ly)) return;
+                if (btn_hit(download, lx, ly)) start = 1;
+            }
+        }
+        if (start) {
+            struct apps_progress_state state = {0, {36, 380, LW() - 72, 54, "Cancelar"}};
+            checked = 0;
+            int rc = other_app_check(&release, apps_download_progress, &state, err, sizeof(err));
+            if (!rc) {
+                checked = 1;
+                char details[160];
+                snprintf(details, sizeof(details), "Versao %s - %.1f MB. Baixar agora?", release.version, release.size / 1048576.0);
+                SDL_Color accent = {96, 154, 232, 255};
+                if (modal_wait_loop("Nplay", details, "Nao precisa de conta ou assinatura Meruem.",
+                                    "Sera salvo no SD e aberto pelo Homebrew Menu.", accent,
+                                    "A/toque = baixar    B/+ = voltar", 1)) {
+                    state.last_frame = 0;
+                    rc = other_app_install(&release, apps_download_progress, &state, err, sizeof(err));
+                    if (!rc) modal_wait_loop("Nplay instalado!", "Feche o Meruem e abra Nplay no Homebrew Menu.",
+                                              "O aplicativo foi salvo em switch/Nplay/Nplay.nro.",
+                                              "As proximas atualizacoes podem ser feitas pelo Nplay.", accent,
+                                              "A/toque = continuar    B/+ = voltar", 1);
+                }
+            }
+            if (rc < 0) message_screen("Nao foi possivel baixar o Nplay.", err);
+            shown = SDL_GetTicks();
+        }
+        begin_frame();
+        draw_background();
+        text_draw_fit(gRen, "Outros apps do desenvolvedor", 36, 80, LW() - 72, COL_HEAD, 1);
+        text_draw_fit(gRen, "Nplay", 36, 160, LW() - 72, COL_SEL, 1);
+        text_draw_fit(gRen, "Seu aplicativo de entretenimento no Switch.", 36, 218, LW() - 72, COL_TEXT, 0);
+        text_draw_fit(gRen, "Baixe aqui, sem login ou assinatura Meruem.", 36, 264, LW() - 72, COL_SOFT, 0);
+        if (checked) {
+            char line[128];
+            snprintf(line, sizeof(line), "Versao disponivel: %s - %.1f MB", release.version, release.size / 1048576.0);
+            text_draw_fit(gRen, line, 36, 318, LW() - 72, COL_DIM, 0);
+        }
+        btn_draw(download); btn_draw(back);
+        draw_footer("A baixar Nplay    B voltar");
+        end_frame();
+        SDL_Delay(16);
+    }
+}
+
+// Tela de boas-vindas / login. 6 = outros apps, sem autenticacao.
 static int login_welcome_screen(int hasUser, const char *user) {
     SDL_Event e;
     Uint32 shown = SDL_GetTicks();
     while (appletMainLoop()) {
         int bw = LW() - 56;
-        int bx = 28, by = 120;
-        int bh = LH() - 240;
-        if (bh > 560) bh = 560;
-        Btn access = { bx + 28, by + bh - 304, bw - 56, 50, hasUser ? "Liberar premium no celular" : "Criar conta gratis / Premium" };
-        Btn qr = { bx + 28, by + bh - 246, bw - 56, 50, "Entrar com QR no celular" };
-        Btn enter = { bx + 28, by + bh - 188, bw - 56, 52, hasUser ? "Entrar com esta conta" : "Entrar com usuario/senha" };
-        Btn offline = { bx + 28, by + bh - 128, bw - 56, 48, "Ler offline / local" };
-        Btn swap  = { bx + 28, by + bh - 70,  bw - 56, 46, "Trocar conta" };
+        int bx = 28, by = 70;
+        int bh = LH() - 140;
+        if (bh > 800) bh = 800;
+        Btn apps = { bx + 28, by + 160, bw - 56, 50, "Outros apps: baixar Nplay (sem login)" };
+        Btn access = { bx + 28, by + 218, bw - 56, 50, hasUser ? "Liberar premium no celular" : "Criar conta gratis / Premium" };
+        Btn qr = { bx + 28, by + 276, bw - 56, 50, "Entrar com QR no celular" };
+        Btn enter = { bx + 28, by + 334, bw - 56, 50, hasUser ? "Entrar com esta conta" : "Entrar com usuario/senha" };
+        Btn offline = { bx + 28, by + 392, bw - 56, 48, "Ler offline / local" };
+        Btn swap  = { bx + 28, by + 450, bw - 56, 46, "Trocar conta" };
 
         while (SDL_PollEvent(&e)) {
             int ready = (SDL_GetTicks() - shown) > 400;
@@ -3162,6 +3272,7 @@ static int login_welcome_screen(int hasUser, const char *user) {
             if (e.type == SDL_FINGERUP) {
                 int lx, ly;
                 screen_to_logical(e.tfinger.x, e.tfinger.y, &lx, &ly);
+                if (btn_hit(apps, lx, ly)) return 6;
                 if (btn_hit(access, lx, ly)) return 5;
                 if (btn_hit(qr, lx, ly)) return 4;
                 if (btn_hit(enter, lx, ly)) return 1;
@@ -3169,6 +3280,7 @@ static int login_welcome_screen(int hasUser, const char *user) {
                 if (hasUser && btn_hit(swap, lx, ly)) return 2;
             }
             if (e.type == SDL_JOYBUTTONDOWN) {
+                if (e.jbutton.button == JOY_MINUS) return 6;
                 if (e.jbutton.button == JOY_A) return 1;
                 if (e.jbutton.button == JOY_PLUS || e.jbutton.button == JOY_B) return 0;
                 if (e.jbutton.button == JOY_X) return 3;
@@ -3192,24 +3304,19 @@ static int login_welcome_screen(int hasUser, const char *user) {
         text_draw_fit(gRen, "Meruem", bx + 28, by + 30, bw - 56, COL_HEAD, 1);
         if (hasUser) {
             char line[160];
-            text_draw_fit(gRen, "Bem-vindo de volta!", bx + 28, by + 96, bw - 56, COL_TEXT, 0);
             snprintf(line, sizeof(line), "Conta: %s", user);
-            text_draw_fit(gRen, line, bx + 28, by + 140, bw - 56, COL_SEL, 0);
-            text_draw_fit(gRen, "QR: login pelo celular. Entrar: senha no Switch.", bx + 28, by + 186, bw - 56, COL_SOFT, 0);
+            text_draw_fit(gRen, line, bx + 28, by + 92, bw - 56, COL_SEL, 0);
         } else {
-            text_draw_fit(gRen, "Bem-vindo! Para ler no Switch:", bx + 28, by + 96, bw - 56, COL_TEXT, 0);
-            text_draw_fit(gRen, "Crie gratis no celular para testar o menu.", bx + 28, by + 142, bw - 56, COL_SOFT, 0);
-            text_draw_fit(gRen, "Premium libera todas as areas sem limite.", bx + 28, by + 178, bw - 56, COL_SEL, 0);
-            text_draw_fit(gRen, "Depois volte aqui e entre com QR.", bx + 28, by + 218, bw - 56, COL_SOFT, 0);
-            text_draw_fit(gRen, "Offline/Local le arquivos no SD.", bx + 28, by + 260, bw - 56, COL_DIM, 0);
+            text_draw_fit(gRen, "Leia com sua conta ou baixe Nplay sem login.", bx + 28, by + 92, bw - 56, COL_TEXT, 0);
         }
+        btn_draw(apps);
         btn_draw(access);
         btn_draw(qr);
         btn_draw(enter);
         btn_draw(offline);
         if (hasUser) btn_draw(swap);
-        text_draw_fit(gRen, hasUser ? "A entrar  L premium  R QR  X offline/local  Y trocar"
-                                    : "A entrar  L criar/liberar  R QR  X offline/local",
+        text_draw_fit(gRen, hasUser ? "- Nplay  A entrar  L premium  R QR  X local  Y trocar"
+                                    : "- Nplay  A entrar  L criar/liberar  R QR  X local",
                       bx + 28, by + bh - 26, bw - 56, COL_DIM, 0);
         end_frame();
         SDL_Delay(16);
@@ -3240,6 +3347,7 @@ static int authenticate(void) {
     while (appletMainLoop()) {
         int act = login_welcome_screen(hasUser, g_username);
         if (act == 0) return 0;
+        if (act == 6) { other_apps_screen(); continue; }
         if (act == 2) { store_clear_user(); g_username[0] = '\0'; hasUser = 0; continue; }
         if (act == 3) { g_offline_mode = 1; return 1; }
         if (act == 4) {
@@ -5158,7 +5266,8 @@ static void render_series(void) {
 
 static void render_settings(void) {
     draw_background();
-    draw_topbar("Conta e ajustes", btn_library());
+    draw_topbar(NULL, btn_library());
+    btn_draw(btn_other_apps());
     btn_draw(btn_areas_top());
     SDL_SetRenderDrawColor(gRen, 22, 30, 46, 232);
     SDL_Rect box = { 28, LIST_Y + 12, LW() - 56, 356 };
@@ -5212,7 +5321,7 @@ static void render_settings(void) {
     btn_draw(btn_qr_login());
     btn_draw(btn_pick_local());
     btn_draw(btn_default_local());
-    draw_footer("A conta  + QR  X local  Y padrao  L/R areas  B voltar");
+    draw_footer("- outros apps  A conta  + QR  X local  Y padrao  L/R areas  B voltar");
 }
 
 static int area_settings_row_y(int idx) {
@@ -5764,6 +5873,7 @@ static void handle_tap(int lx, int ly) {
             if (idx >= 0 && idx < catCount) { catSel = idx; enter_series(idx); }
         }
     } else if (screen == SC_SETTINGS) {
+        if (btn_hit(btn_other_apps(), lx, ly)) { other_apps_screen(); return; }
         if (btn_hit(btn_library(), lx, ly)) { if (catalogFavorites && area_user_visible(areaIdx)) screen = SC_FAVORITES; else switch_area_to(areaIdx); return; }
         if (btn_hit(btn_areas_top(), lx, ly)) { settingsAreaSel = areaIdx >= 0 && areaIdx < AREA_COUNT ? areaIdx : 0; screen = SC_AREA_SETTINGS; return; }
         if (btn_hit(btn_qr_login(), lx, ly)) {
@@ -6388,7 +6498,9 @@ int main(int argc, char **argv) {
                             if (localSel < localScroll) localScroll = localSel;
                             if (localSel >= localScroll + visible_rows()) localScroll = localSel - visible_rows() + 1;
                         } else if (screen == SC_SETTINGS) {
-                            if (b == JOY_A) {
+                            if (b == JOY_MINUS) {
+                                other_apps_screen();
+                            } else if (b == JOY_A) {
                                 store_clear_token();
                                 store_clear_user();
                                 if (g_token) { free(g_token); g_token = NULL; }

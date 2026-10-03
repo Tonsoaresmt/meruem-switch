@@ -1,0 +1,13 @@
+Meruem Switch 0.19.2
+
+- Outros apps do desenvolvedor: baixe Nplay direto pelo Meruem, sem login ou assinatura Meruem.
+- Na tela inicial, toque em "Outros apps: baixar Nplay (sem login)" ou pressione - no controle.
+- Tambem disponivel em Conta e ajustes > Outros apps.
+- Download com progresso, cancelamento, verificacao TLS, tamanho, formato NRO e SHA-256.
+- Salva em switch/Nplay/Nplay.nro e preserva uma copia da instalacao anterior.
+- Inclui o modo noturno de PDF/EPUB da versao 0.19.1.
+
+Depois de baixar, feche o Meruem e abra Nplay no Homebrew Menu.
+Contas e assinaturas dos aplicativos continuam independentes.
+
+Validacao: build ARM64 com -Werror, testes de release/NRO e simulacoes de falhas, cancelamento e preservacao do arquivo anterior. NRO real do Nplay conferido por tamanho e SHA-256. A confirmacao no Switch fisico ainda e necessaria.

@@ -92,6 +92,22 @@ caso de duvida, consulte a tela de planos dentro do Meruem.
 - Arraste para mover imagem com zoom.
 - Proximo capitulo automatico.
 - Atualizacao do `.nro` pelo proprio app.
+- Outros apps do desenvolvedor: baixe Nplay diretamente no SD,
+  sem login ou assinatura Meruem. Na tela inicial, toque no primeiro botao
+  ou pressione `-`. Tambem disponivel em Conta e ajustes > Outros apps.
+
+## Baixar Nplay sem conta Meruem
+
+1. Abra o Meruem e toque em **Outros apps: baixar Nplay (sem login)**,
+   ou pressione `-` no controle.
+2. Escolha **Baixar Nplay** e confirme a versao/tamanho.
+3. Aguarde o download e a verificacao. `B`/`+` ou **Cancelar** interrompe.
+4. Feche o Meruem e abra **Nplay** no Homebrew Menu.
+
+O arquivo e salvo em `sdmc:/switch/Nplay/Nplay.nro`. O download consulta
+sempre a release estavel de `Tonsoaresmt/nplay-switch`, valida TLS, tamanho,
+formato NRO e SHA-256 antes de substituir o aplicativo. Uma copia anterior
+fica em `Nplay.nro.bak`. Contas, planos e dados dos dois apps sao independentes.
 
 ## Formatos Suportados
 
